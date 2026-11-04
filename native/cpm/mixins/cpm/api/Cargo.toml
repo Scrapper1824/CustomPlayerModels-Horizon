@@ -1,0 +1,14 @@
+# CPM's trait-mod package (`[api]` in horizon-mixin.toml). The launcher links it into the game
+# it builds and points `horizon-client` at the staged game crate; it overrides no hook.
+[package]
+name = "horizon-mod-cpm-api"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+horizon-client = "0.1"

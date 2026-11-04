@@ -1,0 +1,317 @@
+[mod]
+id = "cpm"
+version = "0.1.0"
+priority = 100
+
+# The commit it was tested on. It uses the native hook points (hooks 355 in compatibility.json)
+# and one function of the game's own, `Game::first_person_arm` (injection `first_person_arm`,
+# a raw target no hook catalog keeps stable): a Horizon that renamed or changed it fails to build.
+[compatibility]
+horizon_revision = "02c8607ee8ebd216f2f535c1eb7b62b572830df2"
+
+# A trait-mod package that overrides nothing (api/src/lib.rs). It puts CPM in the game's mod list
+# (`mod_api::mods()`): the game reserves the `horizon/modimage` sprite, which holds the model's
+# texture, only when that list is not empty, and a mixin-only mod is not in it.
+[api]
+path = "api"
+
+# The mod's state and logic, free of game types: also the Cargo library its tests use.
+[[module]]
+id = "runtime"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_mod"
+source = "runtime.rs"
+
+# Once a frame: read the stored model choice (once), load it, (re)upload its texture.
+[[injection]]
+id = "frame"
+hook = "frame"
+hook_version = 1
+kind = "HEAD"
+helper = "frame.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
+
+# Ask the game to pose players for native_player_submit (only with a model loaded).
+[[injection]]
+id = "listened"
+hook = "player_render_listened"
+hook_version = 1
+kind = "HEAD"
+helper = "listened.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "listened", ty = "&mut bool", value = "&mut *listened" },
+]
+
+# Draw the local player with the model.
+[[injection]]
+id = "player_submit"
+hook = "player_submit"
+hook_version = 1
+kind = "HEAD"
+helper = "player_submit.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "player", ty = "&crate::game::native_mob_draw::NativeMobRender<'_>", value = "player" },
+  { name = "who", ty = "&crate::game::native_mob_draw::NativePlayerRender<'_>", value = "who" },
+  { name = "draw", ty = "&mut crate::game::native_block_entity_draw::BlockEntityDraw", value = "&mut *draw" },
+  { name = "drawn", ty = "&mut bool", value = "&mut *drawn" },
+]
+
+# The first-person arm: the model's arm instead of the vanilla one. Not a named hook point but
+# the game's own function (game.rs, `first_person_arm`), so it holds for the pinned commit only;
+# cancelled (the vanilla arm skipped) only when the model's arm was drawn.
+[[injection]]
+id = "first_person_arm"
+target = "horizon_client::game::Game<'_>::first_person_arm"
+kind = "HEAD"
+cancellable = true
+helper = "first_person_arm.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "left", ty = "bool", value = "left" },
+  { name = "m", ty = "glam::Mat4", value = "m" },
+  { name = "light", ty = "u32", value = "light" },
+  { name = "out", ty = "&mut Vec<horizon_client::mesher::Vertex>", value = "&mut *out" },
+]
+
+# The quad drawing player_submit and first_person_arm share (no hook of its own).
+[[module]]
+id = "draw"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_draw"
+source = "draw.rs"
+
+# The game-state reader player_submit uses (no hook of its own).
+[[module]]
+id = "pose_probe"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_pose_probe"
+source = "pose_probe.rs"
+
+# What the local player holds and wears on its head, and the drawing of those items at the
+# model's item anchors, which player_submit uses (no hook of its own).
+[[module]]
+id = "item_probe"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_item_probe"
+source = "item_probe.rs"
+
+# The local player's action, hurt and dying state (swing, item in use, ladder, crawling,
+# freezing, health, food, light), which player_submit uses (no hook of its own).
+[[module]]
+id = "action_probe"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_action_probe"
+source = "action_probe.rs"
+
+# The local player's cape (texture, swing, the chest item's wings / humanoid layers, invisible),
+# which player_submit and equipment_probe use (no hook of its own).
+[[module]]
+id = "cape_probe"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_cape_probe"
+source = "cape_probe.rs"
+
+# What the local player wears (armour, trims, elytra) and the atlas textures for it, which
+# player_submit uses (no hook of its own).
+[[module]]
+id = "equipment_probe"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_equipment_probe"
+source = "equipment_probe.rs"
+
+# The settings page's `Convert project…`: the system file picker and the .cpmproject conversion,
+# on a thread of their own (no hook of its own; click.rs starts it).
+[[module]]
+id = "convert"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_convert"
+source = "convert.rs"
+
+# A link model's gist download (ureq, which the game already uses), on a thread of its own (no
+# hook of its own; the frame hook starts the downloads runtime.rs asks for).
+[[module]]
+id = "gist_fetch"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_gist_fetch"
+source = "gist_fetch.rs"
+
+# The format reader and model math: compiled once, outside the game crate.
+[[crate]]
+id = "core"
+path = "cpm-core"
+
+# CPM's row in Options > Mods, with the gesture menu key (gesture_menu, G).
+[[injection]]
+id = "list"
+hook = "mods"
+hook_version = 1
+kind = "HEAD"
+helper = "list.rs"
+bindings = [
+  { name = "mods", ty = "&mut Vec<crate::game::native_hooks::NativeMod>", value = "&mut *mods" },
+]
+
+# The settings page: model, models folder, last error, `Gestures…`.
+[[injection]]
+id = "settings"
+hook = "settings"
+hook_version = 1
+kind = "HEAD"
+helper = "settings.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "buttons", ty = "&mut Vec<String>", value = "&mut *buttons" },
+]
+
+# A click on the settings page.
+[[injection]]
+id = "click"
+hook = "settings_click"
+hook_version = 1
+kind = "HEAD"
+helper = "click.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "button", ty = "usize", value = "button" },
+]
+
+# The gesture menu key.
+[[injection]]
+id = "key"
+hook = "key"
+hook_version = 1
+kind = "HEAD"
+helper = "key.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "key", ty = "&str", value = "key" },
+  { name = "pressed", ty = "bool", value = "pressed" },
+]
+
+# The gist popup (a converted model too big to send directly): one of CPM's two screens on its mod
+# screen. Its logic is in runtime.rs (`GistPopup`); the frame hook opens and closes it and runs its
+# clipboard requests.
+[[module]]
+id = "gist_screen"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_gist"
+source = "gist_screen.rs"
+
+# The gesture menu (the menu key or `Gestures…`): the other of CPM's screens. Its layout and state
+# are in runtime.rs (`layout_menu`, `Menu`); the frame hook opens and closes it.
+[[module]]
+id = "gesture_screen"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_menu"
+source = "gesture_screen.rs"
+
+# Routes each screen hook below to the CPM screen shown (one at a time: Horizon gives a mod one
+# screen).
+[[module]]
+id = "screen"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_screen"
+source = "screen.rs"
+
+# Draws CPM's screen.
+[[injection]]
+id = "screen_render"
+hook = "screen_render_post"
+hook_version = 1
+kind = "HEAD"
+helper = "screen_render.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "batch", ty = "&mut horizon_client::mod_api::HudBatch", value = "&mut *batch" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+]
+
+# Its buttons.
+[[injection]]
+id = "screen_click"
+hook = "screen_mouse_button_pressed_pre"
+hook_version = 1
+kind = "HEAD"
+helper = "screen_click.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# The end of a slider drag (the menu only).
+[[injection]]
+id = "screen_release"
+hook = "screen_mouse_button_released_pre"
+hook_version = 1
+kind = "HEAD"
+helper = "screen_release.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# A slider dragged live, or the preview turned (the menu only).
+[[injection]]
+id = "screen_drag"
+hook = "screen_mouse_dragged_pre"
+hook_version = 1
+kind = "HEAD"
+helper = "screen_drag.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "delta", ty = "[f32; 2]", value = "delta" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# The wheel zooms the preview (the menu only).
+[[injection]]
+id = "screen_scroll"
+hook = "screen_mouse_scrolled_pre"
+hook_version = 1
+kind = "HEAD"
+helper = "screen_scroll.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+  { name = "scroll", ty = "[f64; 2]", value = "scroll" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# Its keys (Escape is left to the game, which closes the screen).
+[[injection]]
+id = "screen_key"
+hook = "screen_key_pressed_pre"
+hook_version = 1
+kind = "HEAD"
+helper = "screen_key.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+  { name = "key", ty = "&str", value = "key" },
+  { name = "modifiers", ty = "u32", value = "modifiers" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# Typing (into the popup's URL field).
+[[injection]]
+id = "screen_char"
+hook = "screen_char_typed_pre"
+hook_version = 1
+kind = "HEAD"
+helper = "screen_char.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+  { name = "c", ty = "char", value = "c" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]

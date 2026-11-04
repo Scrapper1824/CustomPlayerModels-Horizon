@@ -1,0 +1,18 @@
+[package]
+name = "horizon-mod-cpm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Renders Customizable Player Models (.cpmmodel) on the local player, a Horizon native mod."
+
+[lib]
+path = "mixins/cpm/runtime.rs"
+
+[dependencies]
+cpm-core = { path = "mixins/cpm/cpm-core" }
+log = "0.4"
+
+[dev-dependencies]
+# Builds a broken project in a test (the same zip cpm-core reads with).
+zip = { version = "9", default-features = false, features = ["deflate"] }
