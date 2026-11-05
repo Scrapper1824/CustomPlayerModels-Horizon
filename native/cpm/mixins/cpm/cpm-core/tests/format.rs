@@ -150,3 +150,45 @@ fn bad_header_is_error() {
     f[0] = 0x54;
     assert_eq!(read_cpmmodel(&f).unwrap_err(), CpmError::BadHeader);
 }
+
+/// Legacy `MODEL_ROOT` (part 12, `ModelPartRoot`): the `CUSTOM_PART` child with that id
+/// becomes a root of the given `RootModelType` (here the cape, ordinal 0).
+#[test]
+fn legacy_model_root_creates_a_root() {
+    use cpm_core::write::{checksummed, Writer};
+    let mut root = Writer::new();
+    root.varint(10).u8(0);
+    let mut def = Writer::new();
+    def.varint(0).object_block(12, &root).object_block(0, &Writer::new());
+    let mut body = Writer::new();
+    body.object_block(3, &def).object_block(0, &Writer::new());
+    let m = read_definition(&checksummed(0x53, &body.into_bytes())).unwrap();
+    assert_eq!(m.extra_roots.len(), 1);
+    assert_eq!(m.extra_roots[0].root, 0);
+    assert_eq!(m.extra_roots[0].create_from, 10);
+}
+
+/// `ModelPartRoot.apply`: the root takes its fake cube's hidden state once the effects (the
+/// legacy `HIDE`) are applied, so an empty cape or elytra root hides the vanilla piece.
+#[test]
+fn legacy_root_is_hidden_by_its_fake_cubes_hide_effect() {
+    use cpm_core::format::{RawCube, RawEffect};
+    use cpm_core::model::{Model, CUSTOM_PART};
+    use cpm_core::write::{checksummed, Writer};
+    let mut root = Writer::new();
+    root.varint(10).u8(0); // cube 10 becomes the cape root
+    let mut def = Writer::new();
+    def.varint(0).object_block(12, &root).object_block(0, &Writer::new());
+    let mut body = Writer::new();
+    body.object_block(3, &def).object_block(0, &Writer::new());
+    let mut raw = read_definition(&checksummed(0x53, &body.into_bytes())).unwrap();
+    raw.cubes = vec![RawCube {
+        id: 10, parent: CUSTOM_PART, size: [0.0; 3], pos: [0.0; 3], offset: [0.0; 3], rotation: [0.0; 3],
+        tex_size: 1, u: 0, v: 0, rgb: 0, mesh_scale: [1.0; 3], scale: [1.0; 3], mc_scale: 0.0, hidden: false,
+    }];
+    let shown = Model::build(raw.clone()).unwrap();
+    assert!(!shown.extra_roots[0].hidden);
+    raw.effects = vec![RawEffect { kind: 2, payload: vec![10] }];
+    let hidden = Model::build(raw).unwrap();
+    assert!(hidden.extra_roots[0].hidden, "HIDE on the fake cube hides the root");
+}

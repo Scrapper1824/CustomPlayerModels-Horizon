@@ -608,6 +608,58 @@ pub struct Quad {
     pub sprite: usize,
 }
 
+/// Orders `quads` as Minecraft draws an `entityTranslucent` buffer, which CPM draws models with
+/// (`RenderTypes.entityTranslucent`, sorted on upload by `VertexSorting.DISTANCE_TO_ORIGIN`):
+/// farthest first by the camera distance of each quad's centre, a stable sort so ties keep their
+/// order. `pose` takes the quads' frame to the camera-relative draw space (the camera at the
+/// origin). Horizon's entity pass draws in submission order with no culling and lets a later face
+/// win a depth tie, as vanilla does, so a model's faces that lie on one another (layered faces,
+/// flat boxes) show the one CPM shows.
+pub fn back_to_front(quads: &mut [Quad], pose: Mat4) {
+    let dist = |q: &Quad| {
+        let c = q.corners.iter().fold(Vec3::ZERO, |s, p| s + Vec3::from_array(*p)) / 4.0;
+        pose.transform_point3(c).length_squared()
+    };
+    let mut keyed: Vec<(f32, Quad)> = quads.iter().map(|q| (dist(q), q.clone())).collect();
+    keyed.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (slot, (_, q)) in quads.iter_mut().zip(keyed) {
+        *slot = q;
+    }
+}
+
+/// Whether `q` faces the camera under `pose` (the camera at the origin of the draw space): its
+/// outward normal (`(BL - TL) × (BR - TL)`) points towards the camera.
+pub fn facing_camera(q: &Quad, pose: Mat4) -> bool {
+    let p = q.corners.map(|c| pose.transform_point3(Vec3::from_array(c)));
+    (p[1] - p[0]).cross(p[2] - p[0]).dot(-p[0]) > 0.0
+}
+
+/// Splits `quads` for the world draw as CPM renders them: glowing faces go to its eyes layer
+/// (`CustomRenderTypes.EYES`: additive, back faces culled, no depth writes, drawn after the
+/// rest), the others to the solid one (`entityTranslucent`, nothing culled). A glowing face turned
+/// away from the camera is left out; an untinted one is returned in the second list, for an
+/// additive pass; a tinted one (`COLOR_GLOW`) stays with the solid faces, as the additive pass
+/// cannot tint. Each list keeps the order of `quads`.
+pub fn split_glow(quads: &[Quad], pose: Mat4) -> (Vec<Quad>, Vec<Quad>) {
+    let mut solid = Vec::new();
+    let mut additive = Vec::new();
+    for q in quads {
+        if !q.glow {
+            solid.push(q.clone());
+        } else if facing_camera(q, pose) {
+            if q.tint & 0xFF_FFFF == 0xFF_FFFF { additive.push(q.clone()) } else { solid.push(q.clone()) }
+        }
+    }
+    (solid, additive)
+}
+
+/// A vertex's atlas `uv` as its place in the sprite `rect` (`[u0, v0, u1, v1]`, atlas UV): the UV
+/// Horizon's additive energy swirl pass samples by (`fs_energy_swirl`, `crumbling_uv`).
+pub fn swirl_uv(uv: [f32; 2], rect: [f32; 4]) -> [f32; 2] {
+    let d = |a: f32, b: f32| if b - a == 0.0 { 1.0 } else { b - a };
+    [(uv[0] - rect[0]) / d(rect[0], rect[2]), (uv[1] - rect[1]) / d(rect[1], rect[3])]
+}
+
 /// Quads to draw and the sprites they sample.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quads {

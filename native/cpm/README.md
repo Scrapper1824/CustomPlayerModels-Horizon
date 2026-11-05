@@ -21,7 +21,7 @@ or use the launcher window's **Build** button described below.
 
 **As an installed mod (kept with the instance's other native mods):**
 
-1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.1.0.hnmod`.
+1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.1.1.hnmod`.
 2. Copy it to `%APPDATA%\horizon\horizon-native-mods\cpm.hnmod`. Create the folder if it is missing.
 3. Turn it on: add the line `mod.cpm:true` to `%APPDATA%\horizon\horizon-mods.txt`. Create the file if it is
    missing. The launcher builds only the native mods that are turned on there.
@@ -263,7 +263,7 @@ them in the file, so other players' CPM shows them, but this mod does not draw t
 (cd native/cpm/mixins/cpm/cpm-core && cargo test)   # the reader and engine
 python native/tools/native.py check cpm        # apply on the tested Horizon and cargo check the game
                                                # (with the generated game executable the [api] package needs)
-python native/tools/native.py package cpm      # native/target/cpm-0.1.0.hnmod
+python native/tools/native.py package cpm      # native/target/cpm-0.1.1.hnmod
 ```
 
 `cargo test` inside `cpm-core` leaves a `Cargo.lock` and a `target/` there. Delete both before `check`:

@@ -555,7 +555,8 @@ impl States {
                 pos: delta_pos(def_pos, d),
                 rot: delta_rot(def_rot, d),
                 scale: [1.0; 3],
-                visible: !r.hidden,
+                // An animation shows or hides the root's vanilla piece (RootModelElement).
+                visible: d.visible.unwrap_or(!r.hidden),
                 tint: 0xFF_FFFF,
             };
         }

@@ -173,3 +173,79 @@ fn bad_gist_content_is_error() {
     assert!(load_resolved(&bytes, &|_| Ok(b"<html>".to_vec())).is_err());
     assert!(load_resolved(&bytes, &|_| Err(CpmError::Invalid("offline".into()))).is_err());
 }
+
+/// A `.cpmmodel` as CPM's exporter writes a model too big for its data block
+/// (`ModelFile.load`): the data block holds a PACKAGE_LINK to `link`, and the
+/// overflow block holds the package itself, followed by the link (`Link.write`).
+fn overflow_model(link: &str, package: &[u8]) -> Vec<u8> {
+    let link_file = link_model("P", "d", SkinType::Slim, link);
+    let data = data_block(&link_file);
+    let mut w = Writer::new();
+    let mut ovf = Writer::new();
+    ovf.bytes(package);
+    let mut d = Writer::new();
+    d.bytes(&data);
+    w.utf("P").utf("d").block(&d).block(&ovf);
+    w.u8(link.len() as u8).bytes(link.as_bytes());
+    w.block(&Writer::new()); // empty icon
+    checksummed(0x53, &w.into_bytes())
+}
+
+/// A package holding an empty DEFINITION (no cubes), then END.
+fn empty_package() -> Vec<u8> {
+    let mut def = Writer::new();
+    def.varint(0).object_block(0, &Writer::new());
+    let mut body = Writer::new();
+    body.object_block(3 /* DEFINITION */, &def).object_block(0, &Writer::new());
+    checksummed(0x53, &body.into_bytes())
+}
+
+#[test]
+fn overflow_block_is_read_and_resolves_the_local_link() {
+    let bytes = overflow_model("p:bfae20505d5c4232b4e16f65aea7ac4b", &empty_package());
+    let f = read_cpmmodel(&bytes).unwrap();
+    assert_eq!(f.name, "P");
+    assert_eq!(f.data.link, None, "the local link resolves to the overflow package");
+    assert_eq!(f.data.skin_type, SkinType::Slim, "the outer SKIN_TYPE wins");
+}
+
+#[test]
+fn overflow_model_loads_without_fetching() {
+    if common::missing(&["ReggieTheRat.cpmmodel"]) {
+        return;
+    }
+    let bytes = overflow_model("p:abc", &reggie_package());
+    let m = load_resolved(&bytes, &|_| panic!("no fetch expected")).unwrap();
+    assert_eq!(m.model.cubes.len(), 26);
+    let m = load(&bytes).unwrap();
+    assert_eq!(m.model.cubes.len(), 26);
+}
+
+/// A `.cpmmodel` like CPM's own big-model export: the data block holds SKIN_TYPE and a
+/// DEFINITION_LINK; the overflow holds `0x53`, a DEFINITION payload and its checksum.
+#[test]
+fn overflow_definition_link_is_read_in_place() {
+    let link = "p:bfae20505d5c4232b4e16f65aea7ac4b";
+    let mut lp = Writer::new();
+    lp.u8(link.len() as u8).bytes(link.as_bytes());
+    let mut skin = Writer::new();
+    skin.u8(0);
+    let mut body = Writer::new();
+    body.object_block(11, &skin).object_block(4, &lp).object_block(0, &Writer::new());
+    let data = checksummed(0x53, &body.into_bytes());
+    let mut def = Writer::new();
+    def.varint(0).object_block(0, &Writer::new());
+    let target = checksummed(0x53, &def.into_bytes());
+
+    let mut d = Writer::new();
+    d.bytes(&data);
+    let mut ovf = Writer::new();
+    ovf.bytes(&target);
+    let mut w = Writer::new();
+    w.utf("P").utf("d").block(&d).block(&ovf);
+    w.u8(link.len() as u8).bytes(link.as_bytes());
+    w.block(&Writer::new());
+    let f = read_cpmmodel(&checksummed(0x53, &w.into_bytes())).unwrap();
+    assert_eq!(f.data.link, None);
+    assert_eq!(f.data.skin_type, SkinType::Slim);
+}

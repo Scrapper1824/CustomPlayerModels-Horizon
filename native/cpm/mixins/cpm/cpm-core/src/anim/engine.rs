@@ -691,6 +691,12 @@ const FREEZING: Pose = Pose::Other(46);
 const ON_LADDER: Pose = Pose::Other(47);
 const CLIMBING_ON_LADDER: Pose = Pose::Other(48);
 const CRAWLING: Pose = Pose::Other(69);
+const ARMOR_HEAD: Pose = Pose::Other(21);
+const ARMOR_BODY: Pose = Pose::Other(22);
+const ARMOR_LEGS: Pose = Pose::Other(23);
+const ARMOR_BOOTS: Pose = Pose::Other(24);
+const WEARING_ELYTRA: Pose = Pose::Other(25);
+const WEARING_SKULL: Pose = Pose::Other(39);
 
 /// `VanillaPose.DYNAMIC_DURATION_MUL`.
 const DYNAMIC_MUL: f32 = 1000.0;
@@ -969,11 +975,30 @@ impl Engine {
     }
 
     /// `AnimationState.collectAnimations` after GLOBAL, up to the always-on value poses: the
-    /// swing, each arm's pose (left first), eating, hurt, fire and freezing. Armour, parrots,
-    /// speaking, GUI, VR, menu and invisibility poses are not driven.
+    /// swing, what is worn, each arm's pose (left first), eating, hurt, fire and freezing.
+    /// Parrots, speaking, GUI, VR, menu and invisibility poses are not driven.
     fn state_poses(i: &PoseInput, out: &mut Vec<Pose>) {
         if let Some((hand, _)) = i.attack.filter(|a| a.1 > 0.0) {
             out.push(if left_side(i, hand) { Pose::PunchLeft } else { Pose::PunchRight });
+        }
+        // `PlayerProfile`: a skull or head, else any helmet; an elytra (the chest item's glider),
+        // else any chest item; leggings; boots.
+        let e = &i.equipment;
+        if e.skull {
+            out.push(WEARING_SKULL);
+        } else if e.head {
+            out.push(ARMOR_HEAD);
+        }
+        if e.elytra || e.chest_has_wings {
+            out.push(WEARING_ELYTRA);
+        } else if e.chest {
+            out.push(ARMOR_BODY);
+        }
+        if e.legs {
+            out.push(ARMOR_LEGS);
+        }
+        if e.feet {
+            out.push(ARMOR_BOOTS);
         }
         let main = ArmPose::of(i, Hand::Main);
         let mut off = ArmPose::of(i, Hand::Off);

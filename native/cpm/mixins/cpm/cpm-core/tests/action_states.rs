@@ -300,3 +300,40 @@ fn charged_crossbow_is_held_per_hand() {
     let f = sample(&s, PoseInput { holding: [true, false], ..block });
     assert_eq!(rot(&f, 10), None);
 }
+
+/// `collectAnimations`: a skull plays WEARING_SKULL, else a helmet ARMOR_HEAD; an elytra plays
+/// WEARING_ELYTRA, else a chest item ARMOR_BODY; leggings ARMOR_LEGS; boots ARMOR_BOOTS.
+#[test]
+fn wearing_poses_follow_what_is_worn() {
+    use cpm_core::anim::engine::Equipment;
+    const ARMOR_HEAD: u8 = 21;
+    const ARMOR_BODY: u8 = 22;
+    const ARMOR_LEGS: u8 = 23;
+    const ARMOR_BOOTS: u8 = 24;
+    const WEARING_ELYTRA: u8 = 25;
+    const WEARING_SKULL: u8 = 39;
+    let s = set(vec![
+        on(ARMOR_HEAD, 21, 1.0),
+        on(ARMOR_BODY, 22, 1.0),
+        on(ARMOR_LEGS, 23, 1.0),
+        on(ARMOR_BOOTS, 24, 1.0),
+        on(WEARING_ELYTRA, 25, 1.0),
+        on(WEARING_SKULL, 39, 1.0),
+    ]);
+    let with = |equipment: Equipment| sample(&s, PoseInput { equipment, ..at(100) });
+    let none = with(Equipment::default());
+    for id in [21, 22, 23, 24, 25, 39] {
+        assert_eq!(rot(&none, id), None, "nothing worn: pose on {id} is off");
+    }
+    let armour = with(Equipment { head: true, chest: true, legs: true, feet: true, ..Default::default() });
+    for id in [21, 22, 23, 24] {
+        assert!(rot(&armour, id).is_some(), "armour: pose on {id} plays");
+    }
+    assert_eq!(rot(&armour, 25), None);
+    assert_eq!(rot(&armour, 39), None);
+    let elytra = with(Equipment { elytra: true, chest_has_wings: true, skull: true, head: true, ..Default::default() });
+    assert!(rot(&elytra, 25).is_some(), "an elytra plays WEARING_ELYTRA");
+    assert_eq!(rot(&elytra, 22), None, "not ARMOR_BODY with it");
+    assert!(rot(&elytra, 39).is_some(), "a skull plays WEARING_SKULL");
+    assert_eq!(rot(&elytra, 21), None, "not ARMOR_HEAD with it");
+}

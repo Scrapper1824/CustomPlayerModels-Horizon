@@ -426,6 +426,13 @@ impl Model {
             }
         }
 
+        // ModelPartRoot.apply (legacy MODEL_ROOT) hides the root as its fake cube is once the
+        // effects ran (the legacy HIDE marks it): an empty cape or elytra root then hides the
+        // vanilla piece, as the model meant.
+        for r in &mut extra_roots {
+            r.hidden |= cubes[r.node].hidden;
+        }
+
         let elytra_texture = raw.elytra_texture;
         let cape_texture = raw.cape_texture;
         let (texture_size, texture_png) = match raw.texture {

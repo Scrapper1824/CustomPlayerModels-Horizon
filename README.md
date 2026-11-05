@@ -112,7 +112,7 @@ The full guide, with every setting, the gist flow and the known differences from
 python native/tools/native.py package cpm
 ```
 
-This writes `native/target/cpm-0.1.0.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
+This writes `native/target/cpm-0.1.1.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
 straight into the game:
 
 ```sh

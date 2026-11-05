@@ -51,7 +51,7 @@ fn cpm_player_submit(
     let Some(quads) = cpm::quads(&input, &worn) else {
         return;
     };
-    *drawn = crate::game::cpm_draw::quads(game, draw, &quads);
+    *drawn = crate::game::cpm_draw::quads_sorted(game, draw, &quads);
     // The game leaves out its held item and head item layers too: the items go where the model
     // holds them (its item parts, else its arms and head).
     if *drawn {

@@ -2065,3 +2065,53 @@ fn preview_fit_includes_render_scale() {
         assert!((b.half[k] / a.half[k] - 2.0).abs() < 0.05, "plain {a:?} scaled {b:?}");
     }
 }
+
+fn quad_at(z: f32, tint: u32) -> cpm::Quad {
+    cpm::Quad {
+        corners: [[-1.0, 1.0, z], [-1.0, -1.0, z], [1.0, -1.0, z], [1.0, 1.0, z]],
+        uv: [0.0; 4],
+        tint,
+        glow: false,
+        sprite: 0,
+    }
+}
+
+/// CPM draws models as `entityTranslucent`: Minecraft sorts their quads farthest first by the
+/// camera distance of their centres (stable for ties), and a later quad wins a depth tie.
+#[test]
+fn quads_sort_back_to_front_from_the_camera() {
+    let mut q = vec![quad_at(1.0, 1), quad_at(5.0, 2), quad_at(3.0, 3), quad_at(5.0, 4)];
+    // The draw pose puts the model 10 blocks in front of the camera (camera at the origin).
+    cpm::back_to_front(&mut q, cpm_core::glam::Mat4::from_translation(cpm_core::glam::Vec3::new(0.0, 0.0, 10.0)));
+    assert_eq!(q.iter().map(|q| q.tint).collect::<Vec<_>>(), vec![2, 4, 3, 1]);
+    // From the other side the order turns round; ties keep their order.
+    cpm::back_to_front(&mut q, cpm_core::glam::Mat4::from_translation(cpm_core::glam::Vec3::new(0.0, 0.0, -10.0)));
+    assert_eq!(q.iter().map(|q| q.tint).collect::<Vec<_>>(), vec![1, 3, 2, 4]);
+}
+
+/// CPM's glow layer (`CustomRenderTypes.EYES`: additive, culled, no depth writes): glowing faces
+/// turned away from the camera are left out; untinted ones go to the additive pass, tinted ones
+/// (which that pass cannot tint) stay with the solid faces; the rest are solid.
+#[test]
+fn glow_faces_split_for_the_world_draw() {
+    use cpm_core::glam::{Mat4, Vec3};
+    // A quad at z facing +z (corners TL, BL, BR, TR seen from +z), and one facing -z.
+    let facing = |z: f32, tint: u32, glow: bool| cpm::Quad { glow, ..quad_at(z, tint) };
+    let away = |z: f32, tint: u32| {
+        let mut q = facing(z, tint, true);
+        q.corners.swap(1, 3);
+        q
+    };
+    let quads = vec![facing(0.0, 0xFF_FFFF, false), facing(0.0, 0xFF_FFFF, true), away(0.0, 0xFF_FFFF), facing(0.0, 0x00_FF00, true)];
+    // The camera 10 blocks out on +z.
+    let pose = Mat4::from_translation(Vec3::new(0.0, 0.0, -10.0));
+    let (solid, additive) = cpm::split_glow(&quads, pose);
+    assert_eq!(solid.iter().map(|q| (q.glow, q.tint)).collect::<Vec<_>>(), vec![(false, 0xFF_FFFF), (true, 0x00_FF00)]);
+    assert_eq!(additive.len(), 1);
+    assert!(additive[0].glow && additive[0].tint == 0xFF_FFFF);
+}
+
+#[test]
+fn swirl_uv_is_the_place_in_the_sprite() {
+    assert_eq!(cpm::swirl_uv([0.25, 0.75], [0.0, 0.5, 0.5, 1.0]), [0.5, 0.5]);
+}

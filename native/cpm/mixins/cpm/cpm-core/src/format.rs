@@ -19,6 +19,7 @@ mod part {
     pub const TEXTURE: u8 = 17;
     pub const CUBES: u8 = 21;
     pub const PACKAGE_LINK: u8 = 20;
+    pub const MODEL_ROOT: u8 = 12;
     pub const ROOT_INFO: u8 = 22;
     pub const ANIMATION_NEW: u8 = 23;
 }
@@ -137,11 +138,22 @@ pub fn read_cpmmodel(bytes: &[u8]) -> Result<ModelFile> {
     let name = r.utf()?;
     let desc = r.utf()?;
     let data_block = r.block()?;
-    let data = read_definition(block_bytes(data_block))?;
-    r.varint()?; // reserved, always 0
+    // `ModelFile.load`: a model too big for its data block keeps its data in this overflow
+    // block, followed by the link (`Link.write`: 1-byte length, then `loader:path`) that the
+    // data block's link part points at; `registerLocalCache` resolves that link to it.
+    let overflow = block_bytes(r.block()?);
+    let local = if overflow.is_empty() {
+        None
+    } else {
+        let n = r.u8()? as usize;
+        let link = String::from_utf8(r.bytes(n)?.to_vec())
+            .map_err(|e| CpmError::Invalid(format!("link utf8: {e}")))?;
+        Some(Local { link, data: overflow })
+    };
     let icon_png = block_bytes(r.block()?).to_vec();
     let covered = &bytes[1..r.pos()];
     check(&mut r, covered)?;
+    let data = read_definition_with(block_bytes(data_block), local.as_ref())?;
     Ok(ModelFile { name, desc, data, icon_png })
 }
 
@@ -152,6 +164,17 @@ fn block_bytes(mut b: Reader<'_>) -> &[u8] {
 
 /// Decodes model data starting at the `0x53` header, verifying its trailing checksum.
 pub fn read_definition(data: &[u8]) -> Result<RawModel> {
+    read_definition_with(data, None)
+}
+
+/// A link resolved from the file itself (`ModelDefinitionLoader.putLocalResource`).
+struct Local<'a> {
+    link: String,
+    data: &'a [u8],
+}
+
+/// [`read_definition`], with a link part naming `local`'s link read from `local`'s data.
+fn read_definition_with(data: &[u8], local: Option<&Local>) -> Result<RawModel> {
     let mut r = Reader::new(data);
     if r.u8()? != HEADER {
         return Err(CpmError::BadHeader);
@@ -172,14 +195,26 @@ pub fn read_definition(data: &[u8]) -> Result<RawModel> {
         scale: None,
         link: None,
     };
-    read_parts(&mut r, &mut m, 0)?;
+    read_parts(&mut r, &mut m, 0, local)?;
     let covered = &data[1..r.pos()];
     check(&mut r, covered)?;
     Ok(m)
 }
 
+/// `ModelPartDefinition`: the cube count, the cubes, then its own parts until `END`.
+fn read_definition_body(b: &mut Reader, m: &mut RawModel, depth: u32) -> Result<()> {
+    let count = b.varint()?;
+    let first = m.cubes.len() as u32;
+    for i in 0..count {
+        let mut c = read_cube(b)?;
+        c.id = 10 + first + i;
+        m.cubes.push(c);
+    }
+    read_parts(b, m, depth + 1, None)
+}
+
 /// Reads part blocks until `END`.
-fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32) -> Result<()> {
+fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32, local: Option<&Local>) -> Result<()> {
     loop {
         let ty = r.u8()?;
         let mut b = r.block()?;
@@ -189,14 +224,7 @@ fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32) -> Result<()> {
                 if depth > 0 {
                     return Err(CpmError::Invalid("nested definition".into()));
                 }
-                let count = b.varint()?;
-                let first = m.cubes.len() as u32;
-                for i in 0..count {
-                    let mut c = read_cube(&mut b)?;
-                    c.id = 10 + first + i;
-                    m.cubes.push(c);
-                }
-                read_parts(&mut b, m, depth + 1)?;
+                read_definition_body(&mut b, m, depth)?;
             }
             part::SKIN_TYPE => {
                 m.skin_type = match b.u8()? {
@@ -282,6 +310,14 @@ fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32) -> Result<()> {
                     }
                 }
             }
+            part::MODEL_ROOT => {
+                // Legacy `ModelPartRoot`: the `CUSTOM_PART` child cube `id` becomes a root of
+                // `RootModelType` `root`, hidden when that cube is (`setHidden(rc.isHidden())`).
+                let id = b.varint()?;
+                let root = b.u8()?;
+                let hidden = m.cubes.iter().find(|c| c.id == id).is_some_and(|c| c.hidden);
+                m.extra_roots.push(RawRoot { root, create_from: id, hidden, disable_vanilla: false });
+            }
             part::ANIMATION_DATA => m.legacy_anim = Some(block_bytes(b).to_vec()),
             part::ANIMATION_NEW => m.new_anim = Some(block_bytes(b).to_vec()),
             part::DEFINITION_LINK | part::PACKAGE_LINK => {
@@ -293,7 +329,34 @@ fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32) -> Result<()> {
                 if !s.contains(':') {
                     return Err(CpmError::Invalid("link without loader".into()));
                 }
-                m.link = Some(s);
+                match local.filter(|l| l.link == s) {
+                    // `ModelPartLink.resolve`: the target is `0x53`, the linked part's own
+                    // payload, then a checksum.
+                    Some(l) => {
+                        let mut t = Reader::new(l.data);
+                        if t.u8()? != HEADER {
+                            return Err(CpmError::BadHeader);
+                        }
+                        if ty == part::DEFINITION_LINK {
+                            if depth > 0 {
+                                return Err(CpmError::Invalid("nested definition".into()));
+                            }
+                            read_definition_body(&mut t, m, depth)?;
+                        } else {
+                            // A package: every part but the skin type (the outer one wins),
+                            // and no further links (`Pack`).
+                            let skin_type = m.skin_type;
+                            read_parts(&mut t, m, depth, None)?;
+                            m.skin_type = skin_type;
+                            if m.link.is_some() {
+                                return Err(CpmError::Invalid("invalid tag in package".into()));
+                            }
+                        }
+                        let covered = &l.data[1..t.pos()];
+                        check(&mut t, covered)?;
+                    }
+                    None => m.link = Some(s),
+                }
             }
             part::SCALE => m.scale = Some(b.i8()? as f32 / 10.0),
             _ => {} // skipped by block length
