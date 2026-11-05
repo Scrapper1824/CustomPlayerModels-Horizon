@@ -1,6 +1,6 @@
 [mod]
 id = "cpm"
-version = "0.1.1"
+version = "0.1.2"
 priority = 100
 
 # The commit it was tested on. It uses the native hook points (hooks 355 in compatibility.json)

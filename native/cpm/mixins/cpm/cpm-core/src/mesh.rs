@@ -1086,17 +1086,19 @@ fn walk(model: &Model, states: &States, idx: usize, parent: Mat4, paint: Paint, 
     }
     if !shown || !out.draw {
         // Hidden (or a skull-hidden head): walked for the item parts below only.
-    } else if let Some((faces, textured)) = node_faces(node) {
-        out.boxes.push(PosedBox {
-            transform: m,
-            faces,
-            tint: s.tint,
-            glow: node.glow,
-            textured,
-            source: BoxSource::Cube(node.id),
-            texture: paint.texture,
-            texture_px: paint.texture_px,
-        });
+    } else if let Some((meshes, textured)) = node_meshes(node) {
+        for faces in meshes {
+            out.boxes.push(PosedBox {
+                transform: m,
+                faces,
+                tint: s.tint,
+                glow: node.glow,
+                textured,
+                source: BoxSource::Cube(node.id),
+                texture: paint.texture,
+                texture_px: paint.texture_px,
+            });
+        }
     }
     let above = out.shown;
     out.shown = shown;
@@ -1231,6 +1233,103 @@ fn single_faces(offset: [f32; 3], size: [f32; 3], sc: [f32; 3], delta: f32, uv: 
     std::array::from_fn(|f| Some(mc_quad(c.face(f), [u, v, u + s, v + s], mirror)))
 }
 
+/// [`node_faces`], as one box's faces or, for an extruded cube (`createBox`: after `singleTex`,
+/// before per-face UVs), its sliced quads in boxes of six (one transform, so drawn alike).
+fn node_meshes(n: &Node) -> Option<(Vec<[Option<FaceQuad>; 6]>, bool)> {
+    let tex = n.tex_scale as i8 as i32;
+    if n.extrude && tex != 0 && !n.single_tex && !(n.size == [0.0; 3] && n.mc_scale == 0.0) {
+        let quads = extruded_faces(n.offset, n.size, n.scale, n.mc_scale, n.uv, tex);
+        let boxes = quads
+            .chunks(6)
+            .map(|c| std::array::from_fn(|i| c.get(i).copied()))
+            .collect();
+        return Some((boxes, true));
+    }
+    node_faces(n).map(|(faces, textured)| (vec![faces], textured))
+}
+
+/// A quad of `BoxRender`'s with per-vertex texture coordinates `t` (texture pixels) as a
+/// [`FaceQuad`]: the vertex order turned (never reversed, so it faces the same way) until it runs
+/// TL, BL, BR, TR over an axis-aligned UV rectangle.
+fn uv_quad(p: [[f32; 3]; 4], t: [[f32; 2]; 4]) -> FaceQuad {
+    for r in 0..4 {
+        let at = |k: usize| (r + k) % 4;
+        let (tl, bl, br, tr) = (t[at(0)], t[at(1)], t[at(2)], t[at(3)]);
+        if bl[0] == tl[0] && bl[1] == br[1] && tr[0] == br[0] && tr[1] == tl[1] {
+            return FaceQuad { corners: [p[at(0)], p[at(1)], p[at(2)], p[at(3)]], uv: [tl[0], tl[1], br[0], br[1]] };
+        }
+    }
+    FaceQuad { corners: p, uv: [t[0][0], t[0][1], t[2][0], t[2][1]] }
+}
+
+/// `BoxRender.createTexturedExtruded` and its `ExtrudedMesh`: the cube's front texture
+/// (`dx` by `dy` texels from the UV) on a front and a back face, and between them a slice per
+/// texel column (each side) and per texel row (each side) sampling that one texel line, so the
+/// texture's transparent texels leave holes and its opaque ones get sides: a 2D sprite made 3D.
+fn extruded_faces(offset: [f32; 3], size: [f32; 3], sc: [f32; 3], delta: f32, uv: [u32; 2], tex: i32) -> Vec<FaceQuad> {
+    let ts = tex.unsigned_abs() as f32;
+    let dx = (size[0] * ts).ceil().max(0.0) as usize;
+    let dy = (size[1] * ts).ceil().max(0.0) as usize;
+    let [x, y, z] = offset.map(|v| v - delta);
+    let (w, h, d) = (size[0] * sc[0] + delta * 2.0, size[1] * sc[1] + delta * 2.0, size[2] * sc[2] + delta * 2.0);
+    let (min_u, min_v) = (uv[0] as f32 * ts, uv[1] as f32 * ts);
+    let (max_u, max_v) = (min_u + dx as f32, min_v + dy as f32);
+    // The unit mesh's placement: x and y run from the texture's far corner, z out of its back.
+    let m = if tex < 0 {
+        Mat4::from_translation(Vec3::new(x, y + h, z)) * Mat4::from_scale(Vec3::new(w, -h, -d))
+    } else {
+        Mat4::from_translation(Vec3::new(x + w, y + h, z + d)) * Mat4::from_scale(Vec3::new(-w, -h, d))
+    };
+    let pt = |a: f32, b: f32, c: f32| m.transform_point3(Vec3::new(a, b, c)).to_array();
+    let mut q = Vec::with_capacity(2 + 2 * (dx + dy));
+    let mut quad = |p: [[f32; 3]; 4], t: [[f32; 2]; 4]| q.push(uv_quad(p, t));
+    quad(
+        [pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0)],
+        [[max_u, max_v], [min_u, max_v], [min_u, min_v], [max_u, min_v]],
+    );
+    quad(
+        [pt(0.0, 1.0, -1.0), pt(1.0, 1.0, -1.0), pt(1.0, 0.0, -1.0), pt(0.0, 0.0, -1.0)],
+        [[max_u, min_v], [min_u, min_v], [min_u, max_v], [max_u, max_v]],
+    );
+    // Half a texel in: each slice samples the middle of its texel line.
+    let (f5, f6) = (0.5 * (max_u - min_u) / dx.max(1) as f32, 0.5 * (max_v - min_v) / dy.max(1) as f32);
+    for k in 0..dx {
+        let f7 = k as f32 / dx as f32;
+        let f8 = max_u + (min_u - max_u) * f7 - f5;
+        quad(
+            [pt(f7, 0.0, -1.0), pt(f7, 0.0, 0.0), pt(f7, 1.0, 0.0), pt(f7, 1.0, -1.0)],
+            [[f8, max_v], [f8, max_v], [f8, min_v], [f8, min_v]],
+        );
+    }
+    for k in 0..dx {
+        let f7 = k as f32 / dx as f32;
+        let f8 = max_u + (min_u - max_u) * f7 - f5;
+        let f9 = f7 + 1.0 / dx as f32;
+        quad(
+            [pt(f9, 1.0, -1.0), pt(f9, 1.0, 0.0), pt(f9, 0.0, 0.0), pt(f9, 0.0, -1.0)],
+            [[f8, min_v], [f8, min_v], [f8, max_v], [f8, max_v]],
+        );
+    }
+    for k in 0..dy {
+        let f7 = k as f32 / dy as f32;
+        let f8 = max_v + (min_v - max_v) * f7 - f6;
+        let f9 = f7 + 1.0 / dy as f32;
+        quad(
+            [pt(0.0, f9, 0.0), pt(1.0, f9, 0.0), pt(1.0, f9, -1.0), pt(0.0, f9, -1.0)],
+            [[max_u, f8], [min_u, f8], [min_u, f8], [max_u, f8]],
+        );
+    }
+    for k in 0..dy {
+        let f7 = k as f32 / dy as f32;
+        let f8 = max_v + (min_v - max_v) * f7 - f6;
+        quad(
+            [pt(1.0, f7, 0.0), pt(0.0, f7, 0.0), pt(0.0, f7, -1.0), pt(1.0, f7, -1.0)],
+            [[min_u, f8], [max_u, f8], [max_u, f8], [min_u, f8]],
+        );
+    }
+    q
+}
+
 /// `ModelRenderManager.createBox`: `None` for an empty mesh, else the faces and whether the
 /// box is textured.
 fn node_faces(n: &Node) -> Option<([Option<FaceQuad>; 6], bool)> {
@@ -1250,7 +1349,6 @@ fn node_faces(n: &Node) -> Option<([Option<FaceQuad>; 6], bool)> {
     if n.single_tex {
         return Some((single_faces(n.offset, n.size, n.scale, n.mc_scale, n.uv, tex), true));
     }
-    // EXTRUDE is not supported: such cubes draw as ordinary boxes.
     if let Some(per_face) = &n.face_uv {
         let [x, y, z, ex, ey, ez] = bounds(n.offset, n.size, n.scale, n.mc_scale, false);
         let c = Corners::new(x, y, z, ex, ey, ez);

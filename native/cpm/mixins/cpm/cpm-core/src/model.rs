@@ -190,6 +190,8 @@ pub struct Node {
     pub hidden: bool,
     pub glow: bool,
     pub single_tex: bool,
+    /// `EXTRUDE`: drawn as `BoxRender.createTexturedExtruded`'s sliced texture, not a box.
+    pub extrude: bool,
     pub face_uv: Option<[Option<FaceUv>; 6]>,
     /// An item part (`RenderedCube.itemRenderer`): it draws nothing, nor do its children; the
     /// item in that slot is drawn at its transform.
@@ -280,6 +282,7 @@ impl Model {
                 hidden: c.hidden,
                 glow: false,
                 single_tex: false,
+                extrude: false,
                 face_uv: None,
                 item: None,
                 children: Vec::new(),
@@ -422,7 +425,12 @@ impl Model {
                     }
                 }
                 Effect::HideSkull { hide } => hide_head_if_skull = hide,
-                Effect::UvOverflow { .. } | Effect::Extrude { .. } | Effect::Other(_) => {}
+                Effect::Extrude { cube } => {
+                    if let Some(i) = target(cube) {
+                        cubes[i].extrude = true;
+                    }
+                }
+                Effect::UvOverflow { .. } | Effect::Other(_) => {}
             }
         }
 

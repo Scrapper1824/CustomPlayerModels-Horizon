@@ -192,3 +192,41 @@ fn legacy_root_is_hidden_by_its_fake_cubes_hide_effect() {
     let hidden = Model::build(raw).unwrap();
     assert!(hidden.extra_roots[0].hidden, "HIDE on the fake cube hides the root");
 }
+
+/// `EXTRUDE` (`BoxRender.createTexturedExtruded`): a front and a back face over the texture, then
+/// a slice per texel column on each side and per texel row on each side, each one texel line.
+#[test]
+fn extruded_cube_is_sliced_per_texel() {
+    use cpm_core::anim::engine::{Frame, PoseInput};
+    use cpm_core::format::{RawCube, RawEffect};
+    use cpm_core::mesh::{pose_model, BoxSource};
+    use cpm_core::model::Model;
+    use cpm_core::write::{checksummed, Writer};
+    let mut def = Writer::new();
+    def.varint(0).object_block(0, &Writer::new());
+    let mut body = Writer::new();
+    body.object_block(3, &def).object_block(0, &Writer::new());
+    let mut raw = read_definition(&checksummed(0x53, &body.into_bytes())).unwrap();
+    raw.cubes = vec![RawCube {
+        id: 10, parent: 1, size: [3.0, 2.0, 1.0], pos: [0.0; 3], offset: [0.0; 3], rotation: [0.0; 3],
+        tex_size: 1, u: 4, v: 8, rgb: 0, mesh_scale: [1.0; 3], scale: [1.0; 3], mc_scale: 0.0, hidden: false,
+    }];
+    let quads = |raw: cpm_core::format::RawModel| {
+        let m = Model::build(raw).unwrap();
+        let boxes = pose_model(&m, &Frame::default(), &PoseInput::default());
+        boxes.into_iter().filter(|b| b.source == BoxSource::Cube(10)).flat_map(|b| b.faces.into_iter().flatten()).collect::<Vec<_>>()
+    };
+    assert_eq!(quads(raw.clone()).len(), 6, "a plain box");
+    raw.effects = vec![RawEffect { kind: 10, payload: vec![10] }];
+    let q = quads(raw);
+    assert_eq!(q.len(), 2 + 2 * 3 + 2 * 2, "front, back, 3 columns and 2 rows each side");
+    // The front face shows the whole 3x2 texture at (4, 8), across the box's front (z 1) face.
+    let front = &q[0];
+    let (mut us, mut vs) = ([front.uv[0], front.uv[2]], [front.uv[1], front.uv[3]]);
+    us.sort_by(f32::total_cmp);
+    vs.sort_by(f32::total_cmp);
+    assert_eq!((us, vs), ([4.0, 7.0], [8.0, 10.0]));
+    assert!(front.corners.iter().all(|c| (c[2] - 1.0).abs() < 1e-5), "{:?}", front.corners);
+    // Every slice samples a single texel line: zero width in u or in v.
+    assert!(q[2..].iter().all(|f| f.uv[0] == f.uv[2] || f.uv[1] == f.uv[3]));
+}

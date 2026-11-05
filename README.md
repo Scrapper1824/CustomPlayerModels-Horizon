@@ -29,7 +29,7 @@ It also converts `.cpmproject` files from the CPM editor into `.cpmmodel` files.
 | Model arm in first person | 🟢 | 🟢 |
 | Link models (GitHub Gist `git:` links) | 🟢 | 🟢 |
 | Other link types | 🟢 | 🔴 |
-| Extruded faces | 🟢 | 🔴 |
+| Extruded parts | 🟢 | 🟢 |
 | Duplicated root parts | 🟢 | 🔴 |
 | Animated textures | 🟢 | 🔴 |
 | Enchantment glint, emissive and modded armour | 🟢 | 🔴 |
@@ -112,7 +112,7 @@ The full guide, with every setting, the gist flow and the known differences from
 python native/tools/native.py package cpm
 ```
 
-This writes `native/target/cpm-0.1.1.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
+This writes `native/target/cpm-0.1.2.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
 straight into the game:
 
 ```sh
