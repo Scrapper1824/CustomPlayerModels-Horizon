@@ -349,3 +349,103 @@ fn head_item_part_still_places_under_a_skull_hidden_head() {
     assert!(!posed.boxes.iter().any(|b| b.source == BoxSource::Vanilla(0)));
     assert_eq!(anchor(&posed.items, ItemSlot::Head).part, Some(10));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Shoulder parrots (`ParrotOnShoulderLayerMixin`)
+
+/// The `ItemSlot` ordinals of the shoulder parts.
+const LEFT_SHOULDER: u8 = 5;
+const RIGHT_SHOULDER: u8 = 6;
+
+fn shoulder(posed: &cpm_core::Posed, left: bool) -> &cpm_core::ShoulderAnchor {
+    posed.shoulders.iter().find(|a| a.left == left).unwrap_or_else(|| panic!("no shoulder anchor (left {left})"))
+}
+
+/// A model with its vanilla motion off (every part at rest) and these cubes and effects.
+fn still_with(cubes: Vec<RawCube>, effects: Vec<RawEffect>) -> Model {
+    let mut m = synthetic(cubes, effects, true, SkinType::Default);
+    m.vanilla_anim_disabled = [true; 6];
+    m
+}
+
+/// The model root in blocks: the body bone at rest (its pivot is the root's origin, unturned).
+fn root_blocks(posed: &cpm_core::Posed) -> Mat4 {
+    vanilla(&posed.boxes, 1).transform * Mat4::from_scale(Vec3::splat(BLOCKS))
+}
+
+fn translate(x: f32, y: f32, z: f32) -> Mat4 {
+    Mat4::from_translation(Vec3::new(x, y, z))
+}
+
+#[test]
+fn shoulder_anchor_from_item_part() {
+    if common::missing(&["ReggieTheRat.cpmmodel"]) {
+        return;
+    }
+    // Shoulder parts on the body at (1, 2, 3) and (-4, 0, 0) pixels.
+    let mut l = raw_cube(10, 1);
+    l.pos = [1.0, 2.0, 3.0];
+    let mut r = raw_cube(11, 1);
+    r.pos = [-4.0, 0.0, 0.0];
+    let model = still_with(vec![l, r], vec![item_effect(10, LEFT_SHOULDER), item_effect(11, RIGHT_SHOULDER)]);
+    let posed = pose_model_with_items(&model, &Frame::default(), &standing());
+    let root = root_blocks(&posed);
+    // The layer's translate, then the part's transform (relative to the model root).
+    let left = shoulder(&posed, true);
+    assert_eq!(left.part, Some(10));
+    let expect = root * translate(0.4, -1.5, 0.0) * translate(1.0 / 16.0, 2.0 / 16.0, 3.0 / 16.0);
+    assert!(near_mat(left.transform, expect), "{:?} vs {expect:?}", left.transform);
+    let right = shoulder(&posed, false);
+    assert_eq!(right.part, Some(11));
+    let expect = root * translate(-0.4, -1.5, 0.0) * translate(-4.0 / 16.0, 0.0, 0.0);
+    assert!(near_mat(right.transform, expect));
+    // The shoulder parts are not held or head items.
+    assert!(posed.items.iter().all(|a| a.part.is_none()));
+    // A hidden shoulder part holds no parrot (no fallback either).
+    let mut hide = Frame::default();
+    hide.parts.insert(10, PartDelta { visible: Some(false), ..Default::default() });
+    let hidden = pose_model_with_items(&model, &hide, &standing());
+    assert!(hidden.shoulders.iter().all(|a| !a.left));
+}
+
+#[test]
+fn shoulder_anchor_crouch_offset() {
+    if common::missing(&["ReggieTheRat.cpmmodel"]) {
+        return;
+    }
+    let mut l = raw_cube(10, 1);
+    l.pos = [1.0, 2.0, 3.0];
+    l.rotation = [0.0, 90.0, 0.0];
+    let model = still_with(vec![l], vec![item_effect(10, LEFT_SHOULDER)]);
+    let crouch = PoseInput { sneaking: true, ..standing() };
+    let posed = pose_model_with_items(&model, &Frame::default(), &crouch);
+    let root = root_blocks(&posed);
+    // Crouching: the layer's -1.3, and (0, -0.2, 0) after the part's transform, in its frame.
+    let part = translate(1.0 / 16.0, 2.0 / 16.0, 3.0 / 16.0) * Mat4::from_rotation_y(90f32.to_radians());
+    let expect = root * translate(0.4, -1.3, 0.0) * part * translate(0.0, -0.2, 0.0);
+    assert!(near_mat(shoulder(&posed, true).transform, expect));
+    // The shoulder with no part: the layer's translate only.
+    assert!(near_mat(shoulder(&posed, false).transform, root * translate(-0.4, -1.3, 0.0)));
+}
+
+#[test]
+fn shoulder_anchor_fallback() {
+    if common::missing(&["ReggieTheRat.cpmmodel"]) {
+        return;
+    }
+    // No shoulder parts: where vanilla's layer puts the parrot, on the model root (not under the
+    // model's render scale, and not following the body's pose).
+    let model = still_with(Vec::new(), Vec::new());
+    let posed = pose_model_with_items(&model, &Frame::default(), &standing());
+    let root = root_blocks(&posed);
+    for (left, x) in [(true, 0.4), (false, -0.4)] {
+        let a = shoulder(&posed, left);
+        assert_eq!(a.part, None);
+        assert!(near_mat(a.transform, root * translate(x, -1.5, 0.0)), "left {left}");
+    }
+    // Tool and any-slot parts draw nothing and leave the fallback alone.
+    let model = still_with(vec![raw_cube(10, 1), raw_cube(11, 1)], vec![item_effect(10, 3), item_effect(11, 4)]);
+    let posed = pose_model_with_items(&model, &Frame::default(), &standing());
+    assert_eq!(posed.shoulders.len(), 2);
+    assert!(posed.shoulders.iter().all(|a| a.part.is_none()));
+}

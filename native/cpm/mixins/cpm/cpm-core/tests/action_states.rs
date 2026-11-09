@@ -337,3 +337,20 @@ fn wearing_poses_follow_what_is_worn() {
     assert!(rot(&elytra, 39).is_some(), "a skull plays WEARING_SKULL");
     assert_eq!(rot(&elytra, 21), None, "not ARMOR_HEAD with it");
 }
+
+/// `collectAnimations`: PARROT_LEFT / PARROT_RIGHT while a parrot sits on that shoulder (no state
+/// getter: by time).
+#[test]
+fn parrot_poses_play() {
+    const PARROT_LEFT: u8 = 42;
+    const PARROT_RIGHT: u8 = 43;
+    let s = set(vec![on(PARROT_LEFT, 42, 1.0), on(PARROT_RIGHT, 43, 1.0)]);
+    let none = sample(&s, at(100));
+    assert_eq!((rot(&none, 42), rot(&none, 43)), (None, None));
+    let left = sample(&s, PoseInput { parrot_left: true, ..at(100) });
+    assert_eq!((rot(&left, 42), rot(&left, 43)), (Some(1.0), None));
+    let right = sample(&s, PoseInput { parrot_right: true, ..at(100) });
+    assert_eq!((rot(&right, 42), rot(&right, 43)), (None, Some(1.0)));
+    let both = sample(&s, PoseInput { parrot_left: true, parrot_right: true, ..at(100) });
+    assert_eq!((rot(&both, 42), rot(&both, 43)), (Some(1.0), Some(1.0)));
+}

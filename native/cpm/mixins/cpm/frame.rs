@@ -7,9 +7,9 @@ fn cpm_frame(game: &mut crate::game::Game<'_>) {
     if cpm::poll_convert() {
         crate::game::cpm_convert::refresh_page(game);
     }
-    // Gist downloads a link model asked for: each on a thread of its own (gist_fetch.rs).
-    for (link, raw_url) in cpm::take_fetch_requests() {
-        crate::game::cpm_gist_fetch::fetch(link, raw_url);
+    // Link downloads a model asked for: each on a thread of its own (gist_fetch.rs).
+    for (link, urls) in cpm::take_fetch_requests() {
+        crate::game::cpm_gist_fetch::fetch(link, urls);
     }
     // The gist popup: open its screen when due, run what its input asked for, drop it once closed.
     crate::game::cpm_gist::frame(game);

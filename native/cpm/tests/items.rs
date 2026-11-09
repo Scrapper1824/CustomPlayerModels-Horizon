@@ -70,3 +70,16 @@ fn degenerate_anchors_draw_nothing() {
     assert_eq!(draws.len(), 1);
     assert_eq!(draws[0].slot, ItemSlot::OffHand);
 }
+
+#[test]
+fn degenerate_shoulders_draw_no_parrot() {
+    // A zero scale on a shoulder part: no parrot drawn there (and no NaN pose reaches the game).
+    use cpm_core::ShoulderAnchor;
+    let flat = Mat4::from_scale(Vec3::new(0.0, 1.0, 1.0));
+    let anchors = [
+        ShoulderAnchor { left: true, part: Some(3), transform: flat },
+        ShoulderAnchor { left: false, part: None, transform: Mat4::IDENTITY },
+    ];
+    let draws = cpm::parrot_draws(&anchors);
+    assert_eq!(draws, vec![anchors[1]]);
+}

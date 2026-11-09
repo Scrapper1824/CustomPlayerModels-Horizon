@@ -142,12 +142,29 @@ pub struct ItemAnchor {
     pub transform: Mat4,
 }
 
-/// A posed model: its boxes and where its held and head items go.
+/// Where a shoulder parrot is drawn (`ParrotOnShoulderLayer.submitOnShoulder` with CPM's
+/// `ParrotOnShoulderLayerMixin`): the layer's translate (±0.4, -1.5 or -1.3 crouching, 0) on the
+/// model root, then the model's `LEFT_SHOULDER` / `RIGHT_SHOULDER` item part transform (relative
+/// to the model root) and, crouching, (0, -0.2, 0); without a part, the translate alone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShoulderAnchor {
+    /// The left shoulder (`ShoulderEntityLeft`).
+    pub left: bool,
+    /// The shoulder part's cube id; `None` where vanilla puts the parrot.
+    pub part: Option<u32>,
+    /// The parrot model's space (blocks, Y down, as `ParrotModel` draws after the layer's
+    /// translate) to the draw frame.
+    pub transform: Mat4,
+}
+
+/// A posed model: its boxes and where its held and head items and shoulder parrots go.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Posed {
     pub boxes: Vec<PosedBox>,
     /// At most one per slot. A slot whose item parts are all hidden has none (nothing drawn).
     pub items: Vec<ItemAnchor>,
+    /// At most one per shoulder; none for a shoulder whose parts are all hidden.
+    pub shoulders: Vec<ShoulderAnchor>,
 }
 
 /// An extra texture sheet of the model, decoded.
@@ -498,7 +515,7 @@ struct ElemState {
 struct States(Vec<ElemState>);
 
 /// `bases[i]`: the pose (`setPosAndRot`'s px..rz) of the vanilla part `model.extra_roots[i]` is
-/// redirected from, before its part position.
+/// redirected from, before its part position; then the same for each of `model.dup_roots`.
 type Bases = [(Vec3, Vec3)];
 
 impl States {
@@ -555,8 +572,30 @@ impl States {
                 pos: delta_pos(def_pos, d),
                 rot: delta_rot(def_rot, d),
                 scale: [1.0; 3],
-                // An animation shows or hides the root's vanilla piece (RootModelElement).
-                visible: d.visible.unwrap_or(!r.hidden),
+                // Only the hidden flag shows or hides the root's vanilla piece: an animation's
+                // visibility does nothing on a root (`RootModelElement.setVisible` is empty).
+                visible: !r.hidden,
+                tint: 0xFF_FFFF,
+            };
+        }
+        let dup_bases = bases.get(model.extra_roots.len()..).unwrap_or(&[]);
+        for (r, &(base_pos, base_rot)) in model.dup_roots.iter().zip(dup_bases) {
+            let node = &model.cubes[r.node];
+            // RootModelElement.setPosAndRot, as for the part's main root, with the fake cube's
+            // position / rotation as posN / rotN.
+            let (pos_n, rot_n) = (Vec3::from_array(node.pos), deg(node.rotation));
+            let (def_pos, def_rot) = if r.disable_vanilla {
+                (Vec3::from_array(part_values(r.bone, model.skin_type).pos) + pos_n, rot_n)
+            } else {
+                (base_pos + pos_n, base_rot + rot_n)
+            };
+            let d = frame.parts.get(&node.id).unwrap_or(&none);
+            v[BONE_COUNT + r.node] = ElemState {
+                pos: delta_pos(def_pos, d),
+                rot: delta_rot(def_rot, d),
+                scale: [1.0; 3],
+                // As above: not animatable.
+                visible: !r.hidden,
                 tint: 0xFF_FFFF,
             };
         }
@@ -581,7 +620,9 @@ impl States {
     fn copy(&mut self, model: &Model, ct: &TransformCopy) {
         let (Some(fi), Some(ti)) = (Self::slot(model, ct.from), Self::slot(model, ct.to)) else { return };
         let from = self.0[fi];
-        let is_root = |i: usize| i < BONE_COUNT || model.extra_root(i - BONE_COUNT).is_some();
+        let is_root = |i: usize| {
+            i < BONE_COUNT || model.extra_root(i - BONE_COUNT).is_some() || model.dup_root(i - BONE_COUNT).is_some()
+        };
         let (from_root, to_root) = (is_root(fi), is_root(ti));
         let add = ct.has(TransformCopy::ADDITIVE);
         let m = ct.multiply;
@@ -687,7 +728,8 @@ pub fn pose_model_with_items(model: &Model, frame: &Frame, input: &PoseInput) ->
         let d = frame.parts.get(&(b as u32)).unwrap_or(&none);
         (delta_pos(def_pos, d), delta_rot(def_rot, d))
     });
-    let bases = extra_bases(model, &roots, input);
+    let vanilla: [(Vec3, Vec3); BONE_COUNT] = limbs.map(|l| (l.pos, l.rot));
+    let bases = extra_bases(model, &roots, &vanilla, input);
     let states = States::new(model, frame, roots, &bases);
     let mut out = Sink::new();
     let hide_head = model.hide_head_if_skull && input.equipment.skull;
@@ -696,6 +738,7 @@ pub fn pose_model_with_items(model: &Model, frame: &Frame, input: &PoseInput) ->
         let m = root * translate_rotate(s.pos, s.rot);
         out.draw = !(b == HEAD && hide_head);
         bone_boxes(model, &states, b, m, &mut out);
+        dup_root_boxes(model, &states, b, root, &mut out);
     }
     out.draw = true;
     // The armour and elytra holders set up after the player model has drawn: each armour part
@@ -705,14 +748,50 @@ pub fn pose_model_with_items(model: &Model, frame: &Frame, input: &PoseInput) ->
     let worn_states = if model.copies.is_empty() || model.extra_roots.is_empty() {
         None
     } else {
-        Some(States::new(model, frame, posted, &extra_bases(model, &posted, input)))
+        Some(States::new(model, frame, posted, &extra_bases(model, &posted, &vanilla, input)))
     };
     worn_boxes(model, &states, worn_states.as_ref().unwrap_or(&states), input, base, render, &mut out);
     // After the armour and elytra: their roots' item parts store too, while drawn.
     // An item part's anchor is under the render transform (CPM's own stack); the vanilla fallback
     // is not (`PlayerRenderManager.translateAndRotate`: the plain vanilla part).
     let items = item_anchors(model, &states, base, &out.items, input.left_handed);
-    Posed { boxes: out.boxes, items }
+    let shoulders = shoulder_anchors(base, &out.items, input.sneaking);
+    Posed { boxes: out.boxes, items, shoulders }
+}
+
+/// `ParrotOnShoulderLayer.submitOnShoulder`: the parrot ±0.4 blocks to the side (+ the left),
+/// 1.5 up (1.3 crouching; Y is down in model space) from the model root.
+const SHOULDER_X: f32 = 0.4;
+const SHOULDER_Y: f32 = -1.5;
+const SHOULDER_Y_CROUCHING: f32 = -1.3;
+/// `ParrotOnShoulderLayerMixin`: crouching, a shoulder part's parrot is lifted a further 0.2.
+const SHOULDER_PART_CROUCH_Y: f32 = -0.2;
+
+/// The shoulder parrot anchors (`ParrotOnShoulderLayerMixin`): for each shoulder, the layer's
+/// translate on the model root (`base` in blocks, without the render transform: the vanilla
+/// layer's pose stack), then the last drawn shoulder part's transform (`getTransform`, relative
+/// to the model root, so the stored matrix is taken back out of `base`) and the crouch lift; none
+/// when parts of that shoulder were reached but none drawn (`NO_RENDER`); the translate alone
+/// when the model has no part for it (`getTransform` is null).
+fn shoulder_anchors(base: Mat4, parts: &[(ItemPart, u32, Option<Mat4>)], crouching: bool) -> Vec<ShoulderAnchor> {
+    let root = base * Mat4::from_scale(Vec3::splat(PIXELS_PER_BLOCK));
+    let to_root = root.inverse();
+    let y = if crouching { SHOULDER_Y_CROUCHING } else { SHOULDER_Y };
+    let mut out = Vec::new();
+    for (part, left) in [(ItemPart::LeftShoulder, true), (ItemPart::RightShoulder, false)] {
+        let layer = root * Mat4::from_translation(Vec3::new(if left { SHOULDER_X } else { -SHOULDER_X }, y, 0.0));
+        if parts.iter().any(|(p, _, _)| *p == part) {
+            let drawn = parts.iter().rev().find_map(|&(p, id, t)| t.filter(|_| p == part).map(|t| (id, t)));
+            if let Some((id, t)) = drawn {
+                let lift = if crouching { Vec3::new(0.0, SHOULDER_PART_CROUCH_Y, 0.0) } else { Vec3::ZERO };
+                let transform = layer * to_root * t * Mat4::from_translation(lift);
+                out.push(ShoulderAnchor { left, part: Some(id), transform });
+            }
+            continue;
+        }
+        out.push(ShoulderAnchor { left, part: None, transform: layer });
+    }
+    out
 }
 
 /// The item anchors: for each of the right hand, left hand and head, the last drawn item part of
@@ -882,9 +961,16 @@ fn vanilla_root_pose(t: RootType, bones: &[(Vec3, Vec3); BONE_COUNT], i: &PoseIn
     }
 }
 
-/// [`Bases`] for every non-player root (`setRootPosAndRot` from the redirected part).
-fn extra_bases(model: &Model, bones: &[(Vec3, Vec3); BONE_COUNT], i: &PoseInput) -> Vec<(Vec3, Vec3)> {
-    model.extra_roots.iter().map(|r| vanilla_root_pose(r.kind, bones, i)).collect()
+/// [`Bases`] for every non-player root (`setRootPosAndRot` from the redirected part), then every
+/// duplicated player root (its part's vanilla pose, `vanilla`, as the part's main root takes it).
+fn extra_bases(
+    model: &Model,
+    bones: &[(Vec3, Vec3); BONE_COUNT],
+    vanilla: &[(Vec3, Vec3); BONE_COUNT],
+    i: &PoseInput,
+) -> Vec<(Vec3, Vec3)> {
+    let extra = model.extra_roots.iter().map(|r| vanilla_root_pose(r.kind, bones, i));
+    extra.chain(model.dup_roots.iter().map(|r| vanilla[r.bone])).collect()
 }
 
 /// The UV space of a root's cubes in the model's own `sheet`: its declared size when it has a
@@ -1010,6 +1096,33 @@ struct Paint {
 /// its cubes.
 fn bone_boxes(model: &Model, states: &States, b: usize, m: Mat4, out: &mut Sink) {
     if model.keep_vanilla[b] && out.draw {
+        vanilla_boxes(model, b, m, out);
+    }
+    let skin = Paint { texture: BoxTexture::Skin, texture_px: model.texture_size };
+    for &c in &model.roots_by_bone[b] {
+        walk(model, states, c, m, skin, out);
+    }
+}
+
+/// The duplicated roots of bone `b` (`PartRoot.forEach` after the main root), each under `root`
+/// and its own pose: the part's vanilla box and second layer unless hidden, then its cubes.
+fn dup_root_boxes(model: &Model, states: &States, b: usize, root: Mat4, out: &mut Sink) {
+    let skin = Paint { texture: BoxTexture::Skin, texture_px: model.texture_size };
+    for r in model.dup_roots.iter().filter(|r| r.bone == b) {
+        let s = states.cube(r.node);
+        let m = root * translate_rotate(s.pos, s.rot);
+        if s.visible && out.draw {
+            vanilla_boxes(model, b, m, out);
+        }
+        for &c in &model.cubes[r.node].children {
+            walk(model, states, c, m, skin, out);
+        }
+    }
+}
+
+/// Bone `b`'s vanilla part and its second layer (`PlayerPartValues`) under `m`.
+fn vanilla_boxes(model: &Model, b: usize, m: Mat4, out: &mut Sink) {
+    {
         let values = part_values(b, model.skin_type);
         let sheet = sheet_scale(model.texture_size);
         let layers = [
@@ -1028,10 +1141,6 @@ fn bone_boxes(model: &Model, states: &States, b: usize, m: Mat4, out: &mut Sink)
                 texture_px: model.texture_size,
             });
         }
-    }
-    let skin = Paint { texture: BoxTexture::Skin, texture_px: model.texture_size };
-    for &c in &model.roots_by_bone[b] {
-        walk(model, states, c, m, skin, out);
     }
 }
 
@@ -1054,16 +1163,23 @@ pub fn pose_arm(model: &Model, left: bool) -> Vec<PosedBox> {
         let pivot = Vec3::from_array(model.bones[b].pivot);
         if b == bone { (pivot, Vec3::new(0.0, 0.0, z)) } else { (pivot, deg(model.bones[b].rotation)) }
     });
-    let bases = extra_bases(model, &roots, &PoseInput::default());
+    // The vanilla parts at rest (the arm turned by z), as the duplicated roots take them.
+    let vanilla = std::array::from_fn(|b| {
+        let rot = if b == bone { Vec3::new(0.0, 0.0, z) } else { Vec3::ZERO };
+        (Vec3::from_array(part_values(b, model.skin_type).pos), rot)
+    });
+    let bases = extra_bases(model, &roots, &vanilla, &PoseInput::default());
     let states = States::new(model, &Frame::default(), roots, &bases);
     let s = &states.0[bone];
     // setupTransform in AnimationMode.HAND: that hand's first-person transform, before the arm's
     // own translateRotate. The render transform is not applied (PLAYER mode only).
     let hand = model.fp_hand[if left { 0 } else { 1 }].as_ref().map_or(Mat4::IDENTITY, part_transform);
     // render_model: T(pivot / 16) · Rz · (v / 16), which is S(1/16) · T(pivot) · Rz · v.
-    let m = Mat4::from_scale(Vec3::splat(1.0 / 16.0)) * hand * translate_rotate(s.pos, s.rot);
+    let base = Mat4::from_scale(Vec3::splat(1.0 / 16.0)) * hand;
+    let m = base * translate_rotate(s.pos, s.rot);
     let mut out = Sink::new();
     bone_boxes(model, &states, bone, m, &mut out);
+    dup_root_boxes(model, &states, bone, base, &mut out);
     out.boxes
 }
 

@@ -140,14 +140,30 @@ pub struct ExtraRoot {
     pub disable_vanilla: bool,
 }
 
+/// A duplicated player root (`ModelPartRootInfo` with `ROOT_CREATE` alone, legacy
+/// `ModelPartDupRoot`): the fake cube `node` becomes a second `RootModelElement` of player part
+/// `bone`, posed from that part's vanilla pose plus the cube's position and rotation (`posN` /
+/// `rotN`); it draws the part's vanilla box unless hidden, then its children.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DupRoot {
+    pub bone: usize,
+    /// Index into [`Model::cubes`] of the fake cube (no mesh, never drawn itself).
+    pub node: usize,
+    pub hidden: bool,
+    pub disable_vanilla: bool,
+}
+
 /// `ItemSlot` of an item part (`ItemRenderer.slot`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemPart {
     LeftHand,
     RightHand,
     Head,
-    /// Another `ItemSlot` (any slot, tool, shoulders, API) by ordinal: still an item part (no
-    /// mesh, children not drawn), but nothing is drawn there.
+    /// `LEFT_SHOULDER` / `RIGHT_SHOULDER`: where a shoulder parrot sits.
+    LeftShoulder,
+    RightShoulder,
+    /// Another `ItemSlot` (any slot, tool, API) by ordinal: still an item part (no mesh, children
+    /// not drawn), but nothing is drawn there (as in CPM).
     Other(u8),
 }
 
@@ -158,6 +174,8 @@ impl ItemPart {
             0 => ItemPart::LeftHand,
             1 => ItemPart::RightHand,
             2 => ItemPart::Head,
+            5 => ItemPart::LeftShoulder,
+            6 => ItemPart::RightShoulder,
             o => ItemPart::Other(o),
         }
     }
@@ -213,6 +231,8 @@ pub struct Model {
     pub cape_texture: Option<RawTexture>,
     /// Non-player roots (armour, elytra, cape), in file order.
     pub extra_roots: Vec<ExtraRoot>,
+    /// Duplicated player roots, in file order (drawn after their part's main root).
+    pub dup_roots: Vec<DupRoot>,
     pub keep_vanilla: [bool; BONE_COUNT],
     pub vanilla_anim_disabled: [bool; BONE_COUNT],
     /// The render transform of the model's `ScaleData` (`MODEL_SCALE`): applied to the
@@ -230,13 +250,15 @@ pub struct Model {
     index: HashMap<u32, usize>,
     /// Cube index -> index into `extra_roots` for the fake cubes that became roots.
     root_of: HashMap<usize, usize>,
+    /// Cube index -> index into `dup_roots`.
+    dup_of: HashMap<usize, usize>,
 }
 
 /// The deepest cube nesting a model may have (a cube on a bone is depth 1). Deeper trees
 /// are refused by [`Model::build`] with [`CpmError::Invalid`].
 pub const MAX_DEPTH: usize = 256;
 
-const VANILLA_PIVOTS: [[f32; 3]; BONE_COUNT] = [
+pub(crate) const VANILLA_PIVOTS: [[f32; 3]; BONE_COUNT] = [
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
     [5.0, 2.0, 0.0],
@@ -306,7 +328,6 @@ impl Model {
         }
         // ModelPartRootInfo.apply (ROOT_CREATE): the CUSTOM_PART child with id `createFrom` leaves
         // CUSTOM_PART and becomes a root of its type; a second ROOT_INFO for it finds nothing.
-        // Other CUSTOM_PART children stay on the body (duplicated player roots are not split off).
         let mut extra_roots = Vec::new();
         let mut root_of = HashMap::new();
         for r in &raw.extra_roots {
@@ -318,6 +339,25 @@ impl Model {
             roots_by_bone[1].retain(|&c| c != i);
             root_of.insert(i, extra_roots.len());
             extra_roots.push(ExtraRoot { kind, node: i, hidden: r.hidden, disable_vanilla: r.disable_vanilla });
+        }
+        // ModelPartRootInfo.apply / ModelPartDupRoot.apply for a player part: the same, as a
+        // second root of that part (`addRoot(createFrom, PlayerModelParts)`).
+        let mut dup_roots = Vec::new();
+        let mut dup_of = HashMap::new();
+        let mut dup_hidden_from_cube = Vec::new();
+        for r in &raw.dup_roots {
+            let bone = r.part as usize;
+            if bone >= BONE_COUNT {
+                continue;
+            }
+            let Some(&i) = index.get(&r.create_from) else { continue };
+            if raw.cubes[i].parent != CUSTOM_PART || root_of.contains_key(&i) || dup_of.contains_key(&i) {
+                continue;
+            }
+            roots_by_bone[1].retain(|&c| c != i);
+            dup_of.insert(i, dup_roots.len());
+            dup_hidden_from_cube.push(r.hidden_from_cube);
+            dup_roots.push(DupRoot { bone, node: i, hidden: r.hidden, disable_vanilla: r.disable_vanilla });
         }
 
         // Depth and cycle check in one pass (each cube's depth is computed once): a chain that
@@ -440,6 +480,12 @@ impl Model {
         for r in &mut extra_roots {
             r.hidden |= cubes[r.node].hidden;
         }
+        // ModelPartDupRoot.apply likewise; ModelPartRootInfo's duplicate takes its own flag.
+        for (r, from_cube) in dup_roots.iter_mut().zip(dup_hidden_from_cube) {
+            if from_cube {
+                r.hidden = cubes[r.node].hidden;
+            }
+        }
 
         let elytra_texture = raw.elytra_texture;
         let cape_texture = raw.cape_texture;
@@ -457,6 +503,7 @@ impl Model {
             elytra_texture,
             cape_texture,
             extra_roots,
+            dup_roots,
             keep_vanilla: raw.keep_vanilla,
             vanilla_anim_disabled: raw.vanilla_anim_disabled,
             render_transform: scale_data.flatten(),
@@ -465,6 +512,7 @@ impl Model {
             copies,
             index,
             root_of,
+            dup_of,
         })
     }
 
@@ -475,5 +523,10 @@ impl Model {
     /// The non-player root cube `node` was turned into, if it is one.
     pub fn extra_root(&self, node: usize) -> Option<&ExtraRoot> {
         self.root_of.get(&node).map(|&r| &self.extra_roots[r])
+    }
+
+    /// The duplicated player root cube `node` was turned into, if it is one.
+    pub fn dup_root(&self, node: usize) -> Option<&DupRoot> {
+        self.dup_of.get(&node).map(|&r| &self.dup_roots[r])
     }
 }

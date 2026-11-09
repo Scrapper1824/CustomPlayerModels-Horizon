@@ -1,4 +1,4 @@
-//! GitHub-gist links and link models.
+//! Links (`loader:path`: GitHub gists and the other CPM loaders) and link models.
 //!
 //! A *link model* is a `.cpmmodel` whose data is `SKIN_TYPE`, a `PACKAGE_LINK` and `END`
 //! (`Exporter.writeOut`). The linked gist holds the base64 of the *package*: `0x53`, the
@@ -8,7 +8,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
-use crate::format::{HEADER, ModelFile, SkinType, read_cpmmodel, read_definition};
+use crate::format::{HEADER, SkinType, read_cpmmodel, read_cpmmodel_resolving, read_definition};
 use crate::io::{CpmError, Reader, Result};
 use crate::mesh::LoadedModel;
 use crate::write::{Writer, checksummed};
@@ -16,8 +16,6 @@ use crate::write::{Writer, checksummed};
 const END: u8 = 0;
 const SKIN_TYPE: u8 = 11;
 const PACKAGE_LINK: u8 = 20;
-/// `DEFINITION_LINK`, `SKIN_LINK` and `PACKAGE_LINK`: refused inside a package (`Pack`).
-const LINK_PARTS: [u8; 3] = [4, 6, 20];
 
 /// Page URL pattern of `GistResourceLoader`, also accepting the raw URL and a trailing `/raw`.
 /// Returns `git:<user>/<id>`.
@@ -123,34 +121,68 @@ pub fn link_model(name: &str, desc: &str, skin_type: SkinType, link: &str) -> Ve
     checksummed(HEADER, &w.into_bytes())
 }
 
-/// Loads a model, resolving a link model through `fetch(raw_url)` (gist text bytes).
-pub fn load_resolved(bytes: &[u8], fetch: &dyn Fn(&str) -> Result<Vec<u8>>) -> Result<LoadedModel> {
-    let file = read_cpmmodel(bytes)?;
-    let Some(link) = file.data.link.clone() else {
-        return LoadedModel::from_file(file);
-    };
-    let url = gist_raw_url(&link).ok_or_else(|| CpmError::Invalid(format!("unsupported link: {link}")))?;
-    let text = String::from_utf8(fetch(&url)?).map_err(|_| CpmError::Invalid("gist is not text".into()))?;
-    let pkg = decode_gist_text(&text)?;
-    check_no_links(&pkg)?;
-    let mut data = read_definition(&pkg)?;
-    data.skin_type = file.data.skin_type; // the outer SKIN_TYPE wins
-    data.link = None;
-    LoadedModel::from_file(ModelFile { name: file.name, desc: file.desc, data, icon_png: file.icon_png })
+/// `PasteClient.URL` and `URL_CF`: the paste site and its fallback.
+const PASTE: &str = "https://paste.tom5454.com";
+const PASTE_CF: &str = "https://cf-paste.tom5454.com";
+
+/// The URLs a link (`loader:path`) downloads from, in the order tried (`ModelDefinitionLoader.
+/// LOADERS`, each loader's `createURL`): only `p:` has a second one, the fallback
+/// `PasteResourceLoader` turns to when the first does not connect. `local:` is always an error
+/// (`Test in-game model`), as is an unknown loader.
+pub fn link_urls(link: &str) -> Result<Vec<String>> {
+    let unsupported = || CpmError::Invalid("unsupported link".into());
+    let (loader, path) = link.split_once(':').ok_or_else(unsupported)?;
+    if loader == "local" {
+        return Err(CpmError::Invalid("a test in-game model (only CPM's editor loads it)".into()));
+    }
+    if path.is_empty() || path.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(unsupported());
+    }
+    Ok(match loader {
+        "git" => vec![gist_raw_url(link).ok_or_else(unsupported)?],
+        "gh" => vec![format!("https://raw.githubusercontent.com/{path}")],
+        "p" => vec![format!("{PASTE}/raw/{path}"), format!("{PASTE_CF}/raw/{path}")],
+        "pb" => vec![format!("https://pastebin.com/raw/{path}")],
+        "ms" => vec![format!("https://cdn-cpmmodels.tom5454.com/content/{path}")],
+        _ => return Err(unsupported()),
+    })
 }
 
-/// `Pack` rule: a package must not contain link parts.
-fn check_no_links(pkg: &[u8]) -> Result<()> {
-    let mut r = Reader::new(pkg);
-    r.u8()?;
-    loop {
-        let ty = r.u8()?;
-        r.block()?;
-        if LINK_PARTS.contains(&ty) {
-            return Err(CpmError::Invalid("invalid tag in package".into()));
-        }
-        if ty == END {
-            return Ok(());
+/// Downloads `link`'s text through `fetch(url)`: each of [`link_urls`] in turn until one answers.
+pub fn fetch_link(link: &str, fetch: &dyn Fn(&str) -> Result<Vec<u8>>) -> Result<Vec<u8>> {
+    let mut last = None;
+    for url in link_urls(link)? {
+        match fetch(&url) {
+            Ok(text) => return Ok(text),
+            Err(e) => last = Some(e),
         }
     }
+    Err(last.unwrap_or_else(|| CpmError::Invalid("unsupported link".into())))
+}
+
+/// A link's downloaded text, base64-decoded (`ResourceEncoding.BASE64`). Whitespace is ignored,
+/// as [`decode_gist_text`] does: a little more lenient than Java's basic decoder, which refuses a
+/// text with a line break.
+pub fn decode_link_text(text: &[u8]) -> Result<Vec<u8>> {
+    let clean: Vec<u8> = text.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
+    STANDARD.decode(&clean).map_err(|e| CpmError::Invalid(format!("link is not base64: {e}")))
+}
+
+/// A link target's text as a loader serves it: the base64 of `target` (inverse of
+/// [`decode_link_text`]).
+pub fn encode_link_text(target: &[u8]) -> String {
+    STANDARD.encode(target)
+}
+
+/// Loads a model, resolving every link part (a link model's package, a definition or skin link)
+/// through `fetch(url)` ([`fetch_link`]: each link's URLs in turn).
+pub fn load_resolved(bytes: &[u8], fetch: &dyn Fn(&str) -> Result<Vec<u8>>) -> Result<LoadedModel> {
+    load_with_links(bytes, &|link| fetch_link(link, fetch))
+}
+
+/// Loads a model, resolving every link part through `text(link)`: the link's downloaded text
+/// (base64). A linked package holding links is refused (`Pack`).
+pub fn load_with_links(bytes: &[u8], text: &dyn Fn(&str) -> Result<Vec<u8>>) -> Result<LoadedModel> {
+    let file = read_cpmmodel_resolving(bytes, &|link| decode_link_text(&text(link)?))?;
+    LoadedModel::from_file(file)
 }

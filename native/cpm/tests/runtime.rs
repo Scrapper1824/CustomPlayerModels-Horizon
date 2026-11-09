@@ -1099,6 +1099,107 @@ fn bad_cache_is_error_and_dropped() {
     assert!(!cache.exists());
 }
 
+#[test]
+fn cache_path_other_loaders() {
+    let data = Path::new("d");
+    let lc = data.join("link-cache");
+    assert_eq!(cpm::cache_path(data, "pb:Xy12"), Some(lc.join("pb").join("Xy12")));
+    assert_eq!(cpm::cache_path(data, "p:abc-1_2"), Some(lc.join("p").join("abc-1_2")));
+    assert_eq!(cpm::cache_path(data, "gh:a/r/main/m.txt"), Some(lc.join("gh").join("a~2Fr~2Fmain~2Fm~2Etxt")));
+    assert_eq!(cpm::cache_path(data, "ms:../x"), Some(lc.join("ms").join("~2E~2E~2Fx")));
+    for bad in ["local:x", "zz:abc", "pb:", "pb:a b"] {
+        assert_eq!(cpm::cache_path(data, bad), None, "{bad}");
+    }
+    assert_eq!(cpm::cache_path(data, &format!("pb:{}", "a".repeat(161))), None);
+    // Not a link CPM can download: nothing starts.
+    assert!(!cpm::start_fetch("local:x"));
+    assert!(!cpm::start_fetch("zz:abc"));
+}
+
+#[test]
+fn unsupported_link_is_error() {
+    let _ = select_link_model("link_unsupported", "zz:abc");
+    cpm::ensure_loaded();
+    assert_eq!(cpm::last_error().as_deref(), Some("cpm: Reggie.link.cpmmodel: link zz:abc: invalid data: unsupported link"));
+    assert!(!cpm::fetch_in_flight("zz:abc"));
+}
+
+/// Reggie's skin as a `SKIN_LINK` serves it: base64 of `0x53`, the texture, checksum.
+fn reggie_skin_text() -> Vec<u8> {
+    use cpm_core::write::{checksummed, Writer};
+    let t = cpm_core::format::read_cpmmodel(&std::fs::read(sample("ReggieTheRat.cpmmodel")).unwrap()).unwrap().data.texture.unwrap();
+    let mut img = Writer::new();
+    img.bytes(&t.png);
+    let mut w = Writer::new();
+    w.i16(t.declared[0] as i16).i16(t.declared[1] as i16).block(&img);
+    cpm_core::link::encode_link_text(&checksummed(0x53, &w.into_bytes())).into_bytes()
+}
+
+/// A model whose data block is SKIN_TYPE, a PACKAGE_LINK to `package`, a SKIN_LINK to `skin`.
+fn two_link_model(package: &str, skin: &str) -> Vec<u8> {
+    use cpm_core::write::{checksummed, Writer};
+    let mut st = Writer::new();
+    st.u8(1);
+    let mut body = Writer::new();
+    body.object_block(11, &st);
+    for (ty, link) in [(20u8, package), (6, skin)] {
+        let mut lp = Writer::new();
+        lp.u8(link.len() as u8).bytes(link.as_bytes());
+        body.object_block(ty, &lp);
+    }
+    body.object_block(0, &Writer::new());
+    let mut d = Writer::new();
+    d.bytes(&checksummed(0x53, &body.into_bytes()));
+    let mut w = Writer::new();
+    w.utf("Two").utf("").block(&d).varint(0).block(&Writer::new());
+    checksummed(0x53, &w.into_bytes())
+}
+
+#[test]
+fn links_of_other_loaders_download_in_turn_then_cache() {
+    if common::missing(&["Expie_by_Clouddy.cpmproject", "ReggieTheRat.cpmmodel", "SkullDog.cpmmodel", "rainwing-old.cpmproject"]) {
+        return;
+    }
+    let (pkg, skin) = ("pb:twolinkpkg", "ms:twolink/skin");
+    let data = scratch("link_two");
+    let model = data.join("Two.cpmmodel");
+    std::fs::write(&model, two_link_model(pkg, skin)).unwrap();
+    cpm::set_data_dir(data.clone());
+    cpm::select(Some(model.clone()));
+    cpm::ensure_loaded();
+    assert!(cpm::fetch_in_flight(pkg));
+    assert!(!cpm::fetch_in_flight(skin));
+    cpm::finish_fetch(pkg, Ok(reggie_gist()));
+    cpm::ensure_loaded();
+    // The package is in; the skin link is next.
+    assert!(!cpm::has_model());
+    assert!(cpm::fetch_in_flight(skin));
+    cpm::finish_fetch(skin, Ok(reggie_skin_text()));
+    cpm::ensure_loaded();
+    assert_eq!(cpm::last_error(), None);
+    assert_eq!(cpm::with_model(|m| (m.model.cubes.len(), m.texture_px)), Some((26, [75, 64])));
+    // Both cached, keyed by loader and path; next time nothing downloads.
+    assert_eq!(std::fs::read(cpm::cache_path(&data, pkg).unwrap()).unwrap(), reggie_gist());
+    assert!(cpm::cache_path(&data, skin).unwrap().is_file());
+    cpm::select(None);
+    cpm::ensure_loaded();
+    cpm::select(Some(model));
+    cpm::ensure_loaded();
+    assert!(cpm::has_model());
+    assert!(!cpm::fetch_in_flight(pkg) && !cpm::fetch_in_flight(skin));
+}
+
+#[test]
+fn failed_link_of_other_loader_is_error() {
+    let link = "p:failpaste01";
+    let _ = select_link_model("link_paste_fail", link);
+    cpm::ensure_loaded();
+    assert!(cpm::fetch_in_flight(link));
+    cpm::finish_fetch(link, Err("timed out".into()));
+    cpm::ensure_loaded();
+    assert_eq!(cpm::last_error().as_deref(), Some("cpm: Reggie.link.cpmmodel: link p:failpaste01: timed out"));
+}
+
 /// A project whose export the game's loader rejects (a skin.png whose header reads but whose image
 /// data is corrupt): Failed, nothing written.
 #[test]

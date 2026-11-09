@@ -11,5 +11,5 @@ pub mod export;
 
 pub use anim::engine::{CapeState, Engine, Equipment, Frame, Hand, PartDelta, PoseInput, UseKind, FALL_DISTANCE};
 pub use io::{CpmError, Result};
-pub use mesh::{load, ArmorSlot, BoxSource, BoxTexture, FaceQuad, ItemAnchor, ItemSlot, LoadedModel, Posed, PosedBox, Sheet};
+pub use mesh::{load, ArmorSlot, BoxSource, BoxTexture, FaceQuad, ItemAnchor, ItemSlot, LoadedModel, Posed, PosedBox, Sheet, ShoulderAnchor};
 pub use glam;

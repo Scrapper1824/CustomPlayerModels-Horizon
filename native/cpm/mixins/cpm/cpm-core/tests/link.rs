@@ -249,3 +249,137 @@ fn overflow_definition_link_is_read_in_place() {
     assert_eq!(f.data.link, None);
     assert_eq!(f.data.skin_type, SkinType::Slim);
 }
+
+#[test]
+fn link_urls_per_loader() {
+    let urls = |l: &str| link_urls(l).unwrap();
+    assert_eq!(urls("git:alice/abc"), ["https://gist.githubusercontent.com/alice/abc/raw"]);
+    assert_eq!(urls("gh:alice/repo/main/dir/m.txt"), ["https://raw.githubusercontent.com/alice/repo/main/dir/m.txt"]);
+    assert_eq!(urls("p:bfae2050"), ["https://paste.tom5454.com/raw/bfae2050", "https://cf-paste.tom5454.com/raw/bfae2050"]);
+    assert_eq!(urls("pb:Xy12"), ["https://pastebin.com/raw/Xy12"]);
+    assert_eq!(urls("ms:abc/def"), ["https://cdn-cpmmodels.tom5454.com/content/abc/def"]);
+    // `local` is CPM's in-game test model: always an error. Unknown loaders and bad paths too.
+    for bad in ["local:x", "http:alice/abc", "git:alice", "pb:", "gh:a b", "nolink"] {
+        assert!(link_urls(bad).is_err(), "{bad}");
+    }
+    // fetch_link asks the loader's URL.
+    let got = fetch_link("pb:Xy12", &|url| Ok(url.as_bytes().to_vec())).unwrap();
+    assert_eq!(got, b"https://pastebin.com/raw/Xy12");
+}
+
+#[test]
+fn paste_falls_back_to_cf() {
+    let asked = std::cell::RefCell::new(Vec::new());
+    let got = fetch_link("p:abc", &|url| {
+        asked.borrow_mut().push(url.to_owned());
+        if url.starts_with("https://paste.") { Err(CpmError::Invalid("no connection".into())) } else { Ok(b"ok".to_vec()) }
+    })
+    .unwrap();
+    assert_eq!(got, b"ok");
+    assert_eq!(*asked.borrow(), ["https://paste.tom5454.com/raw/abc", "https://cf-paste.tom5454.com/raw/abc"]);
+    // Both failing: the error.
+    assert!(fetch_link("p:abc", &|_| Err(CpmError::Invalid("offline".into()))).is_err());
+}
+
+/// A `.cpmmodel` whose data block is SKIN_TYPE then `parts` (each a part type and its link), END.
+fn linked_model(parts: &[(u8, &str)]) -> Vec<u8> {
+    let mut skin = Writer::new();
+    skin.u8(1);
+    let mut body = Writer::new();
+    body.object_block(11, &skin);
+    for (ty, link) in parts {
+        let mut lp = Writer::new();
+        lp.u8(link.len() as u8).bytes(link.as_bytes());
+        body.object_block(*ty, &lp);
+    }
+    body.object_block(0, &Writer::new());
+    let mut d = Writer::new();
+    d.bytes(&checksummed(0x53, &body.into_bytes()));
+    let mut w = Writer::new();
+    w.utf("L").utf("d").block(&d).varint(0).block(&Writer::new());
+    checksummed(0x53, &w.into_bytes())
+}
+
+/// A `ModelPartLink` target as a loader serves it: base64 of `0x53`, `payload`, checksum.
+fn served(payload: Writer) -> Vec<u8> {
+    b64(&checksummed(0x53, &payload.into_bytes())).into_bytes()
+}
+
+/// A DEFINITION payload: no cubes, a PLAYER part hiding the vanilla head, END.
+fn definition_payload() -> Writer {
+    let mut player = Writer::new();
+    player.u8(0b11_1110);
+    let mut def = Writer::new();
+    def.varint(0).object_block(1, &player).object_block(0, &Writer::new());
+    def
+}
+
+#[test]
+fn definition_link_resolves_remote() {
+    let bytes = linked_model(&[(4, "pb:Def1")]);
+    // Without a fetch it needs the link.
+    match load(&bytes) {
+        Err(CpmError::NeedsLink(l)) => assert_eq!(l, "pb:Def1"),
+        other => panic!("{:?}", other.map(|m| m.name)),
+    }
+    let text = served(definition_payload());
+    let m = load_resolved(&bytes, &|url| {
+        assert_eq!(url, "https://pastebin.com/raw/Def1");
+        Ok(text.clone())
+    })
+    .unwrap();
+    assert_eq!(m.model.keep_vanilla, [false, true, true, true, true, true]);
+    assert_eq!(m.model.skin_type, SkinType::Default);
+    // A bad checksum is refused.
+    let mut raw = checksummed(0x53, &definition_payload().into_bytes());
+    let n = raw.len();
+    raw[n - 1] ^= 1;
+    assert!(load_resolved(&bytes, &|_| Ok(b64(&raw).into_bytes())).is_err());
+}
+
+#[test]
+fn skin_link_resolves_remote() {
+    // A 2x2 PNG.
+    let mut png = Vec::new();
+    {
+        let mut e = png::Encoder::new(&mut png, 2, 2);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&[255; 16]).unwrap();
+    }
+    let mut img = Writer::new();
+    img.bytes(&png);
+    let mut skin = Writer::new();
+    skin.i16(64).i16(64).block(&img);
+    let skin_text = served(skin);
+    let def_text = served(definition_payload());
+    let bytes = linked_model(&[(4, "gh:a/r/main/def.txt"), (6, "ms:skin1")]);
+    let asked = std::cell::RefCell::new(Vec::new());
+    let m = load_resolved(&bytes, &|url| {
+        asked.borrow_mut().push(url.to_owned());
+        Ok(if url.contains("cdn-cpmmodels") { skin_text.clone() } else { def_text.clone() })
+    })
+    .unwrap();
+    assert_eq!(
+        *asked.borrow(),
+        ["https://raw.githubusercontent.com/a/r/main/def.txt", "https://cdn-cpmmodels.tom5454.com/content/skin1"]
+    );
+    assert_eq!(m.texture_px, [64, 64]);
+    assert_eq!(m.png_px, [2, 2]);
+    // The link text resolves per link through load_with_links too.
+    let m = load_with_links(&bytes, &|link| Ok(if link == "ms:skin1" { skin_text.clone() } else { def_text.clone() })).unwrap();
+    assert_eq!(m.texture_px, [64, 64]);
+}
+
+#[test]
+fn links_inside_a_linked_package_are_refused() {
+    // A package holding a SKIN_LINK (`Pack` refuses every link part).
+    let mut link = Writer::new();
+    link.u8(6).bytes(b"pb:skin");
+    let mut body = Writer::new();
+    body.object_block(6, &link).object_block(0, &Writer::new());
+    let text = b64(&checksummed(0x53, &body.into_bytes()));
+    let bytes = link_model("R", "d", SkinType::Default, "pb:pkg");
+    let Err(err) = load_resolved(&bytes, &|_| Ok(text.clone().into_bytes())) else { panic!("loaded") };
+    assert!(err.to_string().contains("invalid tag in package"), "{err}");
+}

@@ -21,7 +21,7 @@ or use the launcher window's **Build** button described below.
 
 **As an installed mod (kept with the instance's other native mods):**
 
-1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.1.2.hnmod`.
+1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.1.3.hnmod`.
 2. Copy it to `%APPDATA%\horizon\horizon-native-mods\cpm.hnmod`. Create the folder if it is missing.
 3. Turn it on: add the line `mod.cpm:true` to `%APPDATA%\horizon\horizon-mods.txt`. Create the file if it is
    missing. The launcher builds only the native mods that are turned on there.
@@ -158,14 +158,22 @@ does:
 - Drawing the items reads the draw's pose back through a probe quad and so depends on Horizon's internal quad
   code (`item_probe.rs`): re-check it whenever Horizon is updated.
 
+The game leaves out the parrots on your shoulders as well, so the model draws them, as CPM does: each parrot
+(the game's own parrot model, colour and on-shoulder animation) sits at the model's `Left Shoulder` / `Right
+Shoulder` item part, following its animations (lifted a little more while sneaking, as in CPM), or, without one,
+where vanilla puts it. A shoulder part that is hidden (or under a hidden part) holds no parrot. Item parts for
+CPM's tool and any slots draw nothing, as in CPM. The parrots are drawn the same way as the items
+(`parrot_probe.rs`, through `item_probe.rs`'s probe quad).
+
 ### Action states
 
 The model's pose animations for what you do play as in CPM: punching (with the swing's progress), holding an
 item in either hand, eating and drinking, blocking, drawing a bow and charging a crossbow (with their pull),
 holding a charged crossbow, the spyglass, trident, goat horn, brush and spear in use, riptide, being on a
 ladder or climbing one, crawling, swimming in water without the swim pose, freezing, being hurt and dying,
-plus health, hunger, air and light. The poses are picked in CPM's order. Speaking, VR, parrots, armor poses,
-the in-GUI and in-menu poses do not play.
+plus health, hunger, air and light, what is worn (a skull or helmet, an elytra or chest piece, leggings, boots)
+and a parrot on either shoulder. The poses are picked in CPM's order. Speaking, VR, the in-GUI and in-menu poses
+do not play.
 
 ### Render scale
 
@@ -241,22 +249,34 @@ If the download fails, or the gist does not hold CPM gist text, the settings pag
 `Error: cpm: <file>: gist git:<user>/<id>: <why>` and you are drawn vanilla. Select the model again (go around
 the **Model** button) to try again. Downloads time out after 15 seconds and take at most 16 MiB.
 
+### Other link types
+
+A model may also link (as a link model, or with a definition or skin link part) to CPM's other loaders: a GitHub
+repository file (`gh:`, `https://raw.githubusercontent.com/<path>`), CPM's paste site (`p:`,
+`https://paste.tom5454.com/raw/<path>`, falling back to `https://cf-paste.tom5454.com/raw/<path>` when the first
+does not connect), Pastebin (`pb:`, `https://pastebin.com/raw/<path>`) and CPM's models CDN (`ms:`,
+`https://cdn-cpmmodels.tom5454.com/content/<path>`). They download, cache and fail as gists do: the cache is
+`.horizon-mod-data\cpm\link-cache\<loader>\<path>` (every character of the path but letters, digits, `-` and `_`
+written `~XX`), and a failure reads `Error: cpm: <file>: link <loader>:<path>: <why>`. A model with several links
+downloads them one after the other. A link inside a linked package is refused, as in CPM; a `local:` link (CPM's
+in-game test model) and an unknown loader are errors (`unsupported link`).
+
 ## Not supported (yet)
 
-Other players' models, modded armor, the enchantment glint, animated textures, items in the preview, and items in
-CPM's other item slots (shoulders, tool slot). Duplicated
-root parts (drawn as plain cubes under the body): the converter keeps them in the file, so other players' CPM
-shows them, but this mod does not draw them as CPM does. Extruded parts are drawn as CPM draws them (the texture
+Other players' models, modded armor, the enchantment glint, animated textures, and items and parrots in the
+preview. Duplicated root parts (a second head, arm and so on) are drawn as
+CPM draws them: they follow their body part's pose with their own offset, draw that part's skin box and second
+layer unless hidden, take their animations and draw their cubes. Extruded parts are drawn as CPM draws them (the texture
 sliced per texel, so its transparent texels leave holes).
 
 ## Layout
 
 | File | What it is |
 |---|---|
-| `mixins/cpm/horizon-mixin.toml` | The bundle: twelve modules, the HEAD hooks (and the `first_person_arm` injection), the `cpm-core` crate and the `[api]` package |
+| `mixins/cpm/horizon-mixin.toml` | The bundle: thirteen modules, the HEAD hooks (and the `first_person_arm` injection), the `cpm-core` crate and the `[api]` package |
 | `mixins/cpm/api/` | A trait-mod package that overrides nothing. It puts CPM in the game's mod list, which the game needs before it reserves the `horizon/modimage` sprite the model's texture goes in |
 | `mixins/cpm/runtime.rs` | State and logic, added to the game as `game::cpm_mod`; also this crate's library, for its tests |
-| `mixins/cpm/*.rs` | One small helper per hook (frame, listened, player_submit, first_person_arm, mods list, settings, click, key, and CPM's mod screen's screen_render, screen_click, screen_release, screen_drag, screen_scroll, screen_key, screen_char); `draw.rs` (`game::cpm_draw`) draws quads for player_submit and first_person_arm; `pose_probe.rs` (`game::cpm_pose_probe`), `action_probe.rs` (`game::cpm_action_probe`), `equipment_probe.rs` (`game::cpm_equipment_probe`), `cape_probe.rs` (`game::cpm_cape_probe`) and `item_probe.rs` (`game::cpm_item_probe`) read the local player's state, its actions, what it wears, its cape and what it holds for player_submit (`item_probe.rs` also draws the held and head items); `convert.rs` (`game::cpm_convert`) runs the file picker and the `.cpmproject` conversion on its own thread; `gist_fetch.rs` (`game::cpm_gist_fetch`) downloads a link model's gist on its own thread; `screen.rs` (`game::cpm_screen`) routes those screen hooks to the CPM screen shown: `gist_screen.rs` (`game::cpm_gist`), the gist popup for a model too big to send directly, or `gesture_screen.rs` (`game::cpm_menu`), the gesture menu |
+| `mixins/cpm/*.rs` | One small helper per hook (frame, listened, player_submit, first_person_arm, mods list, settings, click, key, and CPM's mod screen's screen_render, screen_click, screen_release, screen_drag, screen_scroll, screen_key, screen_char); `draw.rs` (`game::cpm_draw`) draws quads for player_submit and first_person_arm; `pose_probe.rs` (`game::cpm_pose_probe`), `action_probe.rs` (`game::cpm_action_probe`), `equipment_probe.rs` (`game::cpm_equipment_probe`), `cape_probe.rs` (`game::cpm_cape_probe`) `item_probe.rs` (`game::cpm_item_probe`) and `parrot_probe.rs` (`game::cpm_parrot_probe`) read the local player's state, its actions, what it wears, its cape, what it holds and its shoulder parrots for player_submit (`item_probe.rs` also draws the held and head items, `parrot_probe.rs` the parrots); `convert.rs` (`game::cpm_convert`) runs the file picker and the `.cpmproject` conversion on its own thread; `gist_fetch.rs` (`game::cpm_gist_fetch`) downloads a model's links (gists and CPM's other loaders) on its own thread; `screen.rs` (`game::cpm_screen`) routes those screen hooks to the CPM screen shown: `gist_screen.rs` (`game::cpm_gist`), the gist popup for a model too big to send directly, or `gesture_screen.rs` (`game::cpm_menu`), the gesture menu |
 | `mixins/cpm/cpm-core/` | The `.cpmmodel` reader, model, animation engine and posing, free of the game |
 
 ```sh
@@ -264,7 +284,7 @@ sliced per texel, so its transparent texels leave holes).
 (cd native/cpm/mixins/cpm/cpm-core && cargo test)   # the reader and engine
 python native/tools/native.py check cpm        # apply on the tested Horizon and cargo check the game
                                                # (with the generated game executable the [api] package needs)
-python native/tools/native.py package cpm      # native/target/cpm-0.1.2.hnmod
+python native/tools/native.py package cpm      # native/target/cpm-0.1.3.hnmod
 ```
 
 `cargo test` inside `cpm-core` leaves a `Cargo.lock` and a `target/` there. Delete both before `check`:

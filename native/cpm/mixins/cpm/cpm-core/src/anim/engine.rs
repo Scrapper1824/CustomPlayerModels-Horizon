@@ -120,6 +120,10 @@ pub struct PoseInput {
     pub cape: Option<CapeState>,
     /// `isInvisible`: `CapeLayer` draws no cape.
     pub invisible: bool,
+    /// A parrot sits on the left / right shoulder (`parrotOnLeftShoulder` /
+    /// `parrotOnRightShoulder`: PARROT_LEFT / PARROT_RIGHT).
+    pub parrot_left: bool,
+    pub parrot_right: bool,
 }
 
 /// A hand, as the game names it; its side follows [`PoseInput::left_handed`].
@@ -697,6 +701,8 @@ const ARMOR_LEGS: Pose = Pose::Other(23);
 const ARMOR_BOOTS: Pose = Pose::Other(24);
 const WEARING_ELYTRA: Pose = Pose::Other(25);
 const WEARING_SKULL: Pose = Pose::Other(39);
+const PARROT_LEFT: Pose = Pose::Other(42);
+const PARROT_RIGHT: Pose = Pose::Other(43);
 
 /// `VanillaPose.DYNAMIC_DURATION_MUL`.
 const DYNAMIC_MUL: f32 = 1000.0;
@@ -1011,6 +1017,12 @@ impl Engine {
         out.extend(right.pose(false, i));
         if let Some((hand, UseKind::Eat, _)) = i.using {
             out.push(if left_side(i, hand) { EATING_LEFT } else { EATING_RIGHT });
+        }
+        if i.parrot_left {
+            out.push(PARROT_LEFT);
+        }
+        if i.parrot_right {
+            out.push(PARROT_RIGHT);
         }
         if i.hurt {
             out.push(Pose::Hurt);

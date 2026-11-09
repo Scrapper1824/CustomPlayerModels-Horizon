@@ -10,6 +10,7 @@ mod part {
     pub const DEFINITION: u8 = 3;
     pub const DEFINITION_LINK: u8 = 4;
     pub const SKIN: u8 = 5;
+    pub const SKIN_LINK: u8 = 6;
     pub const PLAYER_PARTPOS: u8 = 7;
     pub const RENDER_EFFECT: u8 = 8;
     pub const ANIMATION_DATA: u8 = 10;
@@ -20,6 +21,7 @@ mod part {
     pub const CUBES: u8 = 21;
     pub const PACKAGE_LINK: u8 = 20;
     pub const MODEL_ROOT: u8 = 12;
+    pub const DUP_ROOT: u8 = 14;
     pub const ROOT_INFO: u8 = 22;
     pub const ANIMATION_NEW: u8 = 23;
 }
@@ -75,6 +77,22 @@ pub struct RawRoot {
     pub disable_vanilla: bool,
 }
 
+/// A duplicated player root: `ROOT_INFO` with `ROOT_CREATE` but not `ROOT_MODEL`, or the legacy
+/// `DUP_ROOT` part (`ModelPartDupRoot`). Both `def.addRoot(createFrom, PlayerModelParts)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawDupRoot {
+    /// `PlayerModelParts` ordinal (the bone).
+    pub part: u8,
+    /// Id of the fake cube (a `CUSTOM_PART` child) the root is made from.
+    pub create_from: u32,
+    /// `ROOT_HIDDEN` (`ROOT_INFO`).
+    pub hidden: bool,
+    /// `ROOT_DISABLE_VANILLA` (`ROOT_INFO`).
+    pub disable_vanilla: bool,
+    /// Legacy `DUP_ROOT`: hidden as its fake cube is once the effects ran (`setHidden(rc.isHidden())`).
+    pub hidden_from_cube: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawEffect {
     pub kind: u8,
@@ -96,12 +114,15 @@ pub struct RawModel {
     pub cape_texture: Option<RawTexture>,
     /// Non-player roots (`ROOT_INFO` with `ROOT_MODEL | ROOT_CREATE`), in file order.
     pub extra_roots: Vec<RawRoot>,
+    /// Duplicated player roots, in file order.
+    pub dup_roots: Vec<RawDupRoot>,
     pub part_pos: Vec<PartPos>,
     pub effects: Vec<RawEffect>,
     pub legacy_anim: Option<Vec<u8>>,
     pub new_anim: Option<Vec<u8>>,
     pub scale: Option<f32>,
-    /// `DEFINITION_LINK` / `PACKAGE_LINK` payload (`loader:path`); the model's data lives there.
+    /// The first `DEFINITION_LINK` / `SKIN_LINK` / `PACKAGE_LINK` payload (`loader:path`) left
+    /// unresolved (no local copy, no resolver): part of the model's data lives there.
     pub link: Option<String>,
 }
 
@@ -129,8 +150,23 @@ fn check(r: &mut Reader, covered: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Decodes a whole `.cpmmodel` file.
+/// Decodes a whole `.cpmmodel` file. A link part it cannot resolve from the file itself is left
+/// in [`RawModel::link`].
 pub fn read_cpmmodel(bytes: &[u8]) -> Result<ModelFile> {
+    read_cpmmodel_with(bytes, None)
+}
+
+/// What a remote link resolves to: `resolve(link)` gives the link's target bytes (`0x53`, the
+/// linked part's payload, its checksum: the downloaded text, base64-decoded).
+pub type Resolve<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>>;
+
+/// [`read_cpmmodel`], resolving every link part that the file itself does not hold through
+/// `resolve` (`ModelPartLink.resolve`), in place.
+pub fn read_cpmmodel_resolving(bytes: &[u8], resolve: Resolve) -> Result<ModelFile> {
+    read_cpmmodel_with(bytes, Some(resolve))
+}
+
+fn read_cpmmodel_with(bytes: &[u8], resolve: Option<Resolve>) -> Result<ModelFile> {
     let mut r = Reader::new(bytes);
     if r.u8()? != HEADER {
         return Err(CpmError::BadHeader);
@@ -153,7 +189,8 @@ pub fn read_cpmmodel(bytes: &[u8]) -> Result<ModelFile> {
     let icon_png = block_bytes(r.block()?).to_vec();
     let covered = &bytes[1..r.pos()];
     check(&mut r, covered)?;
-    let data = read_definition_with(block_bytes(data_block), local.as_ref())?;
+    let ctx = Ctx { local: local.as_ref(), resolve, in_package: false };
+    let data = read_definition_with(block_bytes(data_block), ctx)?;
     Ok(ModelFile { name, desc, data, icon_png })
 }
 
@@ -164,7 +201,7 @@ fn block_bytes(mut b: Reader<'_>) -> &[u8] {
 
 /// Decodes model data starting at the `0x53` header, verifying its trailing checksum.
 pub fn read_definition(data: &[u8]) -> Result<RawModel> {
-    read_definition_with(data, None)
+    read_definition_with(data, Ctx { local: None, resolve: None, in_package: false })
 }
 
 /// A link resolved from the file itself (`ModelDefinitionLoader.putLocalResource`).
@@ -173,8 +210,19 @@ struct Local<'a> {
     data: &'a [u8],
 }
 
-/// [`read_definition`], with a link part naming `local`'s link read from `local`'s data.
-fn read_definition_with(data: &[u8], local: Option<&Local>) -> Result<RawModel> {
+/// How link parts are resolved while reading.
+#[derive(Clone, Copy)]
+struct Ctx<'a> {
+    /// A link part naming this link reads from its data.
+    local: Option<&'a Local<'a>>,
+    /// Other links resolve through this, else stay in [`RawModel::link`].
+    resolve: Option<Resolve<'a>>,
+    /// Inside a linked package: link parts are refused (`Pack`).
+    in_package: bool,
+}
+
+/// [`read_definition`], with link parts resolved per `ctx`.
+fn read_definition_with(data: &[u8], ctx: Ctx) -> Result<RawModel> {
     let mut r = Reader::new(data);
     if r.u8()? != HEADER {
         return Err(CpmError::BadHeader);
@@ -188,6 +236,7 @@ fn read_definition_with(data: &[u8], local: Option<&Local>) -> Result<RawModel> 
         elytra_texture: None,
         cape_texture: None,
         extra_roots: Vec::new(),
+        dup_roots: Vec::new(),
         part_pos: Vec::new(),
         effects: Vec::new(),
         legacy_anim: None,
@@ -195,14 +244,14 @@ fn read_definition_with(data: &[u8], local: Option<&Local>) -> Result<RawModel> 
         scale: None,
         link: None,
     };
-    read_parts(&mut r, &mut m, 0, local)?;
+    read_parts(&mut r, &mut m, 0, ctx)?;
     let covered = &data[1..r.pos()];
     check(&mut r, covered)?;
     Ok(m)
 }
 
 /// `ModelPartDefinition`: the cube count, the cubes, then its own parts until `END`.
-fn read_definition_body(b: &mut Reader, m: &mut RawModel, depth: u32) -> Result<()> {
+fn read_definition_body(b: &mut Reader, m: &mut RawModel, depth: u32, ctx: Ctx) -> Result<()> {
     let count = b.varint()?;
     let first = m.cubes.len() as u32;
     for i in 0..count {
@@ -210,21 +259,31 @@ fn read_definition_body(b: &mut Reader, m: &mut RawModel, depth: u32) -> Result<
         c.id = 10 + first + i;
         m.cubes.push(c);
     }
-    read_parts(b, m, depth + 1, None)
+    read_parts(b, m, depth + 1, ctx)
+}
+
+/// `TextureProvider`: the declared size, then the PNG block.
+fn read_texture(b: &mut Reader) -> Result<RawTexture> {
+    let w = b.i16()? as u16 as u32;
+    let h = b.i16()? as u16 as u32;
+    let png = block_bytes(b.block()?).to_vec();
+    Ok(RawTexture { declared: [w, h], png })
 }
 
 /// Reads part blocks until `END`.
-fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32, local: Option<&Local>) -> Result<()> {
+fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32, ctx: Ctx) -> Result<()> {
     loop {
         let ty = r.u8()?;
         let mut b = r.block()?;
         match ty {
             part::END => return Ok(()),
             part::DEFINITION => {
+                // (`Pack` refuses a definition in a linked package; this reader accepts one, as
+                // the legacy packages its own tests and `gist_text` of a legacy model hold.)
                 if depth > 0 {
                     return Err(CpmError::Invalid("nested definition".into()));
                 }
-                read_definition_body(&mut b, m, depth)?;
+                read_definition_body(&mut b, m, depth, ctx)?;
             }
             part::SKIN_TYPE => {
                 m.skin_type = match b.u8()? {
@@ -239,12 +298,7 @@ fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32, local: Option<&Local
                     *v = k & (1 << i) != 0;
                 }
             }
-            part::SKIN => {
-                let w = b.i16()? as u16 as u32;
-                let h = b.i16()? as u16 as u32;
-                let png = block_bytes(b.block()?).to_vec();
-                m.texture = Some(RawTexture { declared: [w, h], png });
-            }
+            part::SKIN => m.texture = Some(read_texture(&mut b)?),
             part::PLAYER_PARTPOS => {
                 m.part_pos.push(PartPos { part: b.varint()?, pos: b.vec6b()?, rot: b.angle()? });
             }
@@ -286,9 +340,18 @@ fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32, local: Option<&Local
                     rot = b.angle()?;
                 }
                 // ModelPartRootInfo: a ROOT_MODEL root (RootModelType) is created from a fake
-                // cube (ROOT_CREATE, the exporter's only form for it). A duplicated player root
-                // (ROOT_CREATE alone) is not split off: its fake cube stays on the body.
-                if flags & ROOT_MODEL != 0 {
+                // cube (ROOT_CREATE, the exporter's only form for it); ROOT_CREATE alone makes a
+                // duplicated root of the player part `root`.
+                if flags & ROOT_MODEL == 0 && flags & ROOT_CREATE != 0 {
+                    let create_from = b.varint()?;
+                    m.dup_roots.push(RawDupRoot {
+                        part: root,
+                        create_from,
+                        hidden: flags & ROOT_HIDDEN != 0,
+                        disable_vanilla: flags & ROOT_DISABLE_VANILLA != 0,
+                        hidden_from_cube: false,
+                    });
+                } else if flags & ROOT_MODEL != 0 {
                     if flags & ROOT_CREATE != 0 {
                         let create_from = b.varint()?;
                         m.extra_roots.push(RawRoot {
@@ -318,9 +381,22 @@ fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32, local: Option<&Local
                 let hidden = m.cubes.iter().find(|c| c.id == id).is_some_and(|c| c.hidden);
                 m.extra_roots.push(RawRoot { root, create_from: id, hidden, disable_vanilla: false });
             }
+            part::DUP_ROOT => {
+                // Legacy `ModelPartDupRoot`: the `CUSTOM_PART` child cube `id` becomes a second
+                // root of player part `part`, hidden when that cube is.
+                let create_from = b.varint()?;
+                let part = b.u8()?;
+                m.dup_roots.push(RawDupRoot {
+                    part,
+                    create_from,
+                    hidden: false,
+                    disable_vanilla: false,
+                    hidden_from_cube: true,
+                });
+            }
             part::ANIMATION_DATA => m.legacy_anim = Some(block_bytes(b).to_vec()),
             part::ANIMATION_NEW => m.new_anim = Some(block_bytes(b).to_vec()),
-            part::DEFINITION_LINK | part::PACKAGE_LINK => {
+            part::DEFINITION_LINK | part::SKIN_LINK | part::PACKAGE_LINK => {
                 // `Link`: one unsigned length byte, then "loader:path".
                 let len = b.u8()? as usize;
                 let raw = b.bytes(len)?;
@@ -329,34 +405,47 @@ fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32, local: Option<&Local
                 if !s.contains(':') {
                     return Err(CpmError::Invalid("link without loader".into()));
                 }
-                match local.filter(|l| l.link == s) {
-                    // `ModelPartLink.resolve`: the target is `0x53`, the linked part's own
-                    // payload, then a checksum.
-                    Some(l) => {
-                        let mut t = Reader::new(l.data);
-                        if t.u8()? != HEADER {
-                            return Err(CpmError::BadHeader);
-                        }
-                        if ty == part::DEFINITION_LINK {
-                            if depth > 0 {
-                                return Err(CpmError::Invalid("nested definition".into()));
-                            }
-                            read_definition_body(&mut t, m, depth)?;
-                        } else {
-                            // A package: every part but the skin type (the outer one wins),
-                            // and no further links (`Pack`).
-                            let skin_type = m.skin_type;
-                            read_parts(&mut t, m, depth, None)?;
-                            m.skin_type = skin_type;
-                            if m.link.is_some() {
-                                return Err(CpmError::Invalid("invalid tag in package".into()));
-                            }
-                        }
-                        let covered = &l.data[1..t.pos()];
-                        check(&mut t, covered)?;
-                    }
-                    None => m.link = Some(s),
+                if depth > 0 && ty != part::PACKAGE_LINK {
+                    // `ModelPartDefinition`: no definition or skin link among its own parts,
+                    // refused before anything is fetched.
+                    return Err(CpmError::Invalid("invalid tag in definition".into()));
                 }
+                if ctx.in_package {
+                    // `Pack`: a linked package holds no further links.
+                    return Err(CpmError::Invalid("invalid tag in package".into()));
+                }
+                let fetched;
+                let target: &[u8] = match (ctx.local.filter(|l| l.link == s), ctx.resolve) {
+                    (Some(l), _) => l.data,
+                    (None, Some(resolve)) => {
+                        fetched = resolve(&s)?;
+                        &fetched
+                    }
+                    (None, None) => {
+                        m.link.get_or_insert(s);
+                        continue;
+                    }
+                };
+                // `ModelPartLink.resolve`: the target is `0x53`, the linked part's own payload,
+                // then a checksum.
+                let mut t = Reader::new(target);
+                if t.u8()? != HEADER {
+                    return Err(CpmError::BadHeader);
+                }
+                match ty {
+                    part::DEFINITION_LINK => read_definition_body(&mut t, m, depth, ctx)?,
+                    // `ModelPartSkin`: the skin texture.
+                    part::SKIN_LINK => m.texture = Some(read_texture(&mut t)?),
+                    _ => {
+                        // A package: every part but the skin type (the outer one wins), and no
+                        // further links.
+                        let skin_type = m.skin_type;
+                        read_parts(&mut t, m, depth, Ctx { in_package: true, ..ctx })?;
+                        m.skin_type = skin_type;
+                    }
+                }
+                let covered = &target[1..t.pos()];
+                check(&mut t, covered)?;
             }
             part::SCALE => m.scale = Some(b.i8()? as f32 / 10.0),
             _ => {} // skipped by block length

@@ -28,12 +28,12 @@ It also converts `.cpmproject` files from the CPM editor into `.cpmmodel` files.
 | First-person hand position | 🟢 | 🟢 |
 | Model arm in first person | 🟢 | 🟢 |
 | Link models (GitHub Gist `git:` links) | 🟢 | 🟢 |
-| Other link types | 🟢 | 🔴 |
+| Other link types | 🟢 | 🟢 |
 | Extruded parts | 🟢 | 🟢 |
-| Duplicated root parts | 🟢 | 🔴 |
+| Duplicated root parts | 🟢 | 🟢 |
 | Animated textures | 🟢 | 🔴 |
 | Enchantment glint, emissive and modded armour | 🟢 | 🔴 |
-| Items on shoulder and tool slots | 🟢 | 🔴 |
+| Parrots on shoulder parts (tool and any-slot parts draw nothing, as in CPM) | 🟢 | 🟢 |
 | Models on player heads (skulls) | 🟢 | 🔴 |
 | Model stored in the skin file | 🟢 | 🔴 |
 
@@ -52,7 +52,8 @@ It also converts `.cpmproject` files from the CPM editor into `.cpmmodel` files.
 | Gestures, custom poses, toggles, sliders, dropdowns | 🟢 | 🟢 |
 | Gesture parameters saved per model | 🟢 | 🟢 |
 | Speaking pose (voice chat) | 🟢 | 🔴 |
-| Spear and spyglass item motions, parrots | 🟢 | 🔴 |
+| Parrot poses (parrot on the left / right shoulder) | 🟢 | 🟢 |
+| Spear and spyglass item motions | 🟢 | 🔴 |
 | VR and OSC support | 🟢 | 🔴 |
 
 ### Tools and menus
@@ -112,7 +113,7 @@ The full guide, with every setting, the gist flow and the known differences from
 python native/tools/native.py package cpm
 ```
 
-This writes `native/target/cpm-0.1.2.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
+This writes `native/target/cpm-0.1.3.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
 straight into the game:
 
 ```sh

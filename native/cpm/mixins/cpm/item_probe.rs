@@ -41,15 +41,8 @@ pub(super) fn held<'a>(game: &'a crate::game::Game<'_>) -> Held<'a> {
 /// player's (game/mob_blocks.rs): held items resolved with the player as their owner
 /// (`Game::player_owner`: the item in use, its use ticks, the main arm, a cast rod) and the hand
 /// for CIT rules; a worn skull or head with the skull renderer (`submit_special`). `walk`: the
-/// player's walk position, which a worn dragon or piglin head animates with.
-///
-/// `BlockEntityDraw` has no matrix multiply and keeps its vertices to itself, so the items are
-/// drawn beside it: its pose is read back from a probe quad drawn under it (a quad's corners go
-/// through the pose and nothing else), its vertices are taken out with `into_vertices`, the items
-/// added under pose times their transform (exact for any affine transform), and the draw rebuilt
-/// with `posed` around them, its pose, light and level lights as they were. Nothing is drawn when
-/// the probe's sprite is missing. This reaches into the pinned Horizon's game module (as the
-/// other probes do).
+/// player's walk position, which a worn dragon or piglin head animates with. Drawn beside `draw`
+/// ([`draw_beside`]).
 pub(super) fn draw_items(
     game: &crate::game::Game<'_>,
     draw: &mut crate::game::native_block_entity_draw::BlockEntityDraw,
@@ -59,8 +52,7 @@ pub(super) fn draw_items(
     walk: f32,
 ) {
     use crate::game::cpm_mod as cpm;
-    use crate::game::native_block_entity_draw::BlockEntityDraw;
-    use glam::{Mat4, Vec3};
+    use glam::Mat4;
     use horizon_assets::item_model::{DisplayContext, SpecialKind, SpecialModel};
     let stacks: Vec<_> = items
         .iter()
@@ -76,6 +68,80 @@ pub(super) fn draw_items(
     if stacks.is_empty() {
         return;
     }
+    let light = draw.light;
+    let lights = horizon_client::block_entity_render::diffuse_lights(game.dim == crate::game::Dim::Nether);
+    draw_beside(game, draw, |pose, verts| {
+        for (item, stack) in stacks {
+            let t = pose * Mat4::from_cols_array(&item.transform.to_cols_array());
+            let skull = if item.skull { crate::game::armor_stands::skull_kind(&stack.item) } else { None };
+            if let Some(kind) = skull {
+                // head_item_geometry's skull path (CustomHeadLayer, the player's skull offset 0).
+                let special = SpecialModel {
+                    kind: if kind == "player" {
+                        SpecialKind::PlayerHead
+                    } else {
+                        SpecialKind::Head { kind: kind.to_owned(), texture: None, animation: walk }
+                    },
+                };
+                let mut sink = horizon_client::item_render::WorldSink {
+                    out: &mut *verts,
+                    light,
+                    lights: Some(lights),
+                    glint: game.glint(),
+                    tier: 0,
+                };
+                let profile = stack
+                    .extra
+                    .as_deref()
+                    .and_then(|d| d.other.iter().find(|(k, _)| k == "minecraft:profile"))
+                    .map(|(_, t)| horizon_client::scoreboard::tag_to_json(t))
+                    .unwrap_or(serde_json::Value::Null);
+                let has_foil = stack.data().is_some_and(|d| !d.enchantments.is_empty());
+                game.pack.item_renderer.submit_special(
+                    &special,
+                    &profile,
+                    has_foil,
+                    t,
+                    &game.gui.atlas.sprites,
+                    &game.item_host(),
+                    &mut sink,
+                );
+                continue;
+            }
+            let display = match item.display {
+                cpm::ItemDisplay::ThirdPersonLeftHand => DisplayContext::ThirdPersonLeftHand,
+                cpm::ItemDisplay::ThirdPersonRightHand => DisplayContext::ThirdPersonRightHand,
+                cpm::ItemDisplay::Head => DisplayContext::Head,
+            };
+            let hand = match item.slot {
+                cpm_core::ItemSlot::OffHand => horizon_client::cit::Hand::Off,
+                _ => horizon_client::cit::Hand::Main,
+            };
+            let owner = game.player_owner(Some(stack));
+            let state = game.resolve_item_in_hand(stack, display, Some(&owner), id as i32 + item.seed, hand);
+            // An empty stack or one with no model draws nothing.
+            game.submit_item_world(&state, t, light, &mut *verts);
+        }
+    });
+}
+
+/// Runs `add` with the pose of `draw` (its frame to the vertices' space) and its vertices, to add
+/// vertices of its own beside them (the items here, the shoulder parrots in parrot_probe.rs).
+///
+/// `BlockEntityDraw` has no matrix multiply and keeps its vertices to itself, so: its pose is read
+/// back from a probe quad drawn under it (a quad's corners go through the pose and nothing else),
+/// its vertices are taken out with `into_vertices`, `add` adds under the pose times its own
+/// transforms (exact for any affine transform), and the draw is rebuilt with `posed` around them,
+/// its pose, light and level lights as they were. Nothing is run when the probe's sprite is
+/// missing. This reaches into the pinned Horizon's game module (as the other probes do).
+pub(super) fn draw_beside(
+    game: &crate::game::Game<'_>,
+    draw: &mut crate::game::native_block_entity_draw::BlockEntityDraw,
+    add: impl FnOnce(glam::Mat4, &mut Vec<horizon_client::mesher::Vertex>),
+) {
+    use crate::game::cpm_mod as cpm;
+    use crate::game::native_block_entity_draw::BlockEntityDraw;
+    use glam::{Mat4, Vec3};
     // The probe: the origin and the three unit axes, in that order.
     let probe = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     if !game.native_draw_quad(draw, cpm::SPRITE, probe, [0.0; 4], 0xFF_FFFF) {
@@ -92,56 +158,6 @@ pub(super) fn draw_items(
     let at: Vec<Vec3> = verts[n - 4..].iter().map(|v| Vec3::from_array(v.pos)).collect();
     verts.truncate(n - 4);
     let pose = Mat4::from_cols((at[1] - at[0]).extend(0.0), (at[2] - at[0]).extend(0.0), (at[3] - at[0]).extend(0.0), at[0].extend(1.0));
-    for (item, stack) in stacks {
-        let t = pose * Mat4::from_cols_array(&item.transform.to_cols_array());
-        let skull = if item.skull { crate::game::armor_stands::skull_kind(&stack.item) } else { None };
-        if let Some(kind) = skull {
-            // head_item_geometry's skull path (CustomHeadLayer, the player's skull offset 0).
-            let special = SpecialModel {
-                kind: if kind == "player" {
-                    SpecialKind::PlayerHead
-                } else {
-                    SpecialKind::Head { kind: kind.to_owned(), texture: None, animation: walk }
-                },
-            };
-            let mut sink = horizon_client::item_render::WorldSink {
-                out: &mut verts,
-                light,
-                lights: Some(lights),
-                glint: game.glint(),
-                tier: 0,
-            };
-            let profile = stack
-                .extra
-                .as_deref()
-                .and_then(|d| d.other.iter().find(|(k, _)| k == "minecraft:profile"))
-                .map(|(_, t)| horizon_client::scoreboard::tag_to_json(t))
-                .unwrap_or(serde_json::Value::Null);
-            let has_foil = stack.data().is_some_and(|d| !d.enchantments.is_empty());
-            game.pack.item_renderer.submit_special(
-                &special,
-                &profile,
-                has_foil,
-                t,
-                &game.gui.atlas.sprites,
-                &game.item_host(),
-                &mut sink,
-            );
-            continue;
-        }
-        let display = match item.display {
-            cpm::ItemDisplay::ThirdPersonLeftHand => DisplayContext::ThirdPersonLeftHand,
-            cpm::ItemDisplay::ThirdPersonRightHand => DisplayContext::ThirdPersonRightHand,
-            cpm::ItemDisplay::Head => DisplayContext::Head,
-        };
-        let hand = match item.slot {
-            cpm_core::ItemSlot::OffHand => horizon_client::cit::Hand::Off,
-            _ => horizon_client::cit::Hand::Main,
-        };
-        let owner = game.player_owner(Some(stack));
-        let state = game.resolve_item_in_hand(stack, display, Some(&owner), id as i32 + item.seed, hand);
-        // An empty stack or one with no model draws nothing.
-        game.submit_item_world(&state, t, light, &mut verts);
-    }
+    add(pose, &mut verts);
     *draw = BlockEntityDraw::posed(partial, game_time, light, block, pose, lights, verts);
 }

@@ -282,6 +282,11 @@ pub(crate) fn fill_component(
         let c = &model.cubes[n];
         let p = r.kind.values().pos;
         (Target::Cube(n), [0, 1, 2].map(|k| p[k] + c.pos[k]), c.rotation, None, true)
+    } else if let Some((n, r)) = model.node_index(cid).and_then(|n| model.dup_root(n).map(|r| (n, r))) {
+        // A duplicated player root: its part's default position plus its part position.
+        let c = &model.cubes[n];
+        let p = crate::model::VANILLA_PIVOTS[r.bone];
+        (Target::Cube(n), [0, 1, 2].map(|k| p[k] + c.pos[k]), c.rotation, None, true)
     } else if let Some(n) = model.node_index(cid) {
         let c = &model.cubes[n];
         (Target::Cube(n), c.pos, c.rotation, c.color, !c.hidden)

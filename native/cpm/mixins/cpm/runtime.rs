@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cpm_core::glam::{Mat4, Vec3};
-use cpm_core::{ArmorSlot, BoxTexture, Equipment, ItemAnchor, ItemSlot, LoadedModel, Posed, PoseInput, PosedBox, Sheet};
+use cpm_core::{ArmorSlot, BoxTexture, Equipment, ItemAnchor, ItemSlot, LoadedModel, Posed, PoseInput, PosedBox, Sheet, ShoulderAnchor};
 
 /// The mod's id: its data folder and its row in Options > Mods.
 pub const ID: &str = "cpm";
@@ -52,8 +52,8 @@ struct State {
     gist_requests: Vec<GistRequest>,
     /// The mod's data folder ([`set_data_dir`]), which holds the gist cache.
     data_dir: Option<PathBuf>,
-    /// The selected link model waiting for its gist download: (link, the model file's bytes).
-    waiting: Option<(String, Vec<u8>)>,
+    /// The selected link model waiting for one of its links' downloads.
+    waiting: Option<Waiting>,
     /// A model just loaded and its saved parameters were not restored yet ([`restore_params`]).
     restore_pending: bool,
     /// The parameters last restored or saved, with the model file they belong to
@@ -98,10 +98,12 @@ pub fn selected() -> Option<PathBuf> {
 /// Loads the selected model when the selection changed. A failure is logged once
 /// (`cpm: <file>: <error>`) and kept for [`last_error`]; no model is drawn then.
 ///
-/// A link model (`.link.cpmmodel`) loads from its cached gist text ([`cache_path`]); without one
-/// it asks for a download ([`start_fetch`]) and the vanilla player is drawn until the download
-/// ends ([`finish_fetch`]): a later call then caches the text and loads the model. A failed
-/// download is `cpm: <file>: gist <link>: <reason>`, tried again when the model is selected again.
+/// A model with links (a `.link.cpmmodel`, or link parts of any CPM loader: gist, GitHub file,
+/// paste, Pastebin, models CDN) loads from their cached texts ([`cache_path`]); a link without
+/// one asks for a download ([`start_fetch`]) and the vanilla player is drawn until the download
+/// ends ([`finish_fetch`]): a later call then resolves the next link, or caches the texts and loads
+/// the model. A failed download is `cpm: <file>: gist <link>: <reason>` (`link <link>` for the
+/// other loaders), tried again when the model is selected again.
 pub fn ensure_loaded() {
     STATE.with_borrow_mut(|s| {
         if s.selected == s.loaded {
@@ -150,58 +152,93 @@ fn accept(s: &mut State, name: &str, model: LoadedModel) {
     }
 }
 
-/// A link model's error line.
+/// A link model waiting for a download: the link being downloaded, the model file's bytes, and
+/// the texts of its links downloaded so far (cached once the model loads).
+struct Waiting {
+    link: String,
+    bytes: Vec<u8>,
+    got: Vec<(String, Vec<u8>)>,
+}
+
+/// A link model's error line: `gist <link>` for a gist, `link <link>` for the other loaders.
 fn gist_error(name: &str, link: &str, reason: impl std::fmt::Display) -> String {
-    format!("cpm: {name}: gist {link}: {reason}")
+    let kind = if link.starts_with("git:") { "gist" } else { "link" };
+    format!("cpm: {name}: {kind} {link}: {reason}")
 }
 
-/// The link model `bytes` (file `name`) links to `link`: load it from the cache, else start its
-/// download and wait for it.
+/// The model `bytes` (file `name`) has a link part `link` it cannot resolve itself: resolve its
+/// links from the cache, downloading each one missing in turn.
 fn load_link(s: &mut State, name: &str, bytes: Vec<u8>, link: String) {
-    if cache_path(Path::new(""), &link).is_none() {
-        return fail(s, gist_error(name, &link, "unsupported link"));
+    if let Err(e) = cpm_core::link::link_urls(&link) {
+        return fail(s, gist_error(name, &link, e));
     }
-    // No data folder known (not from the game): nowhere to cache, but it still downloads.
-    let cache = s.data_dir.as_deref().and_then(|d| cache_path(d, &link));
-    let Some(cache) = cache.filter(|c| c.is_file()) else { return wait_for(s, bytes, link) };
-    let read = |_: &str| {
-        std::fs::read(&cache).map_err(|e| cpm_core::CpmError::Invalid(format!("cannot read the cache: {e}")))
-    };
-    match cpm_core::link::load_resolved(&bytes, &read) {
-        Ok(model) => accept(s, name, model),
-        Err(e) => {
-            // A bad cached copy is dropped: selecting the model again downloads it afresh.
-            let _ = std::fs::remove_file(&cache);
-            fail(s, gist_error(name, &link, e));
+    resolve(s, name, bytes, Vec::new());
+}
+
+/// Loads `bytes` with every link resolved from `got` (downloaded this time) or the cache. The
+/// first link found in neither is downloaded and the model waits for it; once all resolve, the
+/// downloaded texts are cached. A failure names the last link asked for and drops the cached
+/// copies read (selecting the model again downloads them afresh).
+fn resolve(s: &mut State, name: &str, bytes: Vec<u8>, got: Vec<(String, Vec<u8>)>) {
+    let data_dir = s.data_dir.clone();
+    let read_caches = RefCell::new(Vec::<PathBuf>::new());
+    let last = RefCell::new(String::new());
+    let missing = RefCell::new(None::<String>);
+    let text = |link: &str| -> cpm_core::Result<Vec<u8>> {
+        *last.borrow_mut() = link.to_owned();
+        if let Some((_, t)) = got.iter().find(|(l, _)| l == link) {
+            return Ok(t.clone());
         }
-    }
-}
-
-fn wait_for(s: &mut State, bytes: Vec<u8>, link: String) {
-    start_fetch(&link);
-    s.waiting = Some((link, bytes));
-    poll_link(s);
-}
-
-/// The waiting link model's download ended: load it and cache its text, or fail.
-fn poll_link(s: &mut State) {
-    let Some(result) = s.waiting.as_ref().and_then(|(link, _)| take_fetch_result(link)) else { return };
-    let Some((link, bytes)) = s.waiting.take() else { return };
-    let name = file_name(s.loaded.as_deref());
-    let text = match result {
-        Ok(text) => text,
-        Err(reason) => return fail(s, gist_error(&name, &link, reason)),
+        cpm_core::link::link_urls(link)?;
+        // No data folder known (not from the game): nowhere to cache, but it still downloads.
+        let cache = data_dir.as_deref().and_then(|d| cache_path(d, link)).filter(|c| c.is_file());
+        if let Some(cache) = cache {
+            let t = std::fs::read(&cache)
+                .map_err(|e| cpm_core::CpmError::Invalid(format!("cannot read the cache: {e}")));
+            read_caches.borrow_mut().push(cache);
+            return t;
+        }
+        *missing.borrow_mut() = Some(link.to_owned());
+        Err(cpm_core::CpmError::NeedsLink(link.to_owned()))
     };
-    match cpm_core::link::load_resolved(&bytes, &|_| Ok(text.clone())) {
+    let result = cpm_core::link::load_with_links(&bytes, &text);
+    let (last, missing) = (last.into_inner(), missing.into_inner());
+    match result {
         Ok(model) => {
-            if let Some(cache) = s.data_dir.as_deref().and_then(|d| cache_path(d, &link))
-                && let Err(e) = write_cache(&cache, &text)
-            {
-                log::warn!("cpm: {name}: gist {link}: {e}");
+            for (link, t) in &got {
+                if let Some(cache) = data_dir.as_deref().and_then(|d| cache_path(d, link))
+                    && let Err(e) = write_cache(&cache, t)
+                {
+                    log::warn!("{}", gist_error(name, link, e));
+                }
             }
-            accept(s, &name, model);
+            accept(s, name, model);
         }
-        Err(e) => fail(s, gist_error(&name, &link, e)),
+        Err(cpm_core::CpmError::NeedsLink(link)) if missing.as_deref() == Some(link.as_str()) => {
+            start_fetch(&link);
+            s.waiting = Some(Waiting { link, bytes, got });
+            poll_link(s);
+        }
+        Err(e) => {
+            for cache in read_caches.into_inner() {
+                let _ = std::fs::remove_file(cache);
+            }
+            fail(s, gist_error(name, &last, e));
+        }
+    }
+}
+
+/// The waiting link model's download ended: resolve the model again with it, or fail.
+fn poll_link(s: &mut State) {
+    let Some(result) = s.waiting.as_ref().and_then(|w| take_fetch_result(&w.link)) else { return };
+    let Some(Waiting { link, bytes, mut got }) = s.waiting.take() else { return };
+    let name = file_name(s.loaded.as_deref());
+    match result {
+        Ok(text) => {
+            got.push((link, text));
+            resolve(s, &name, bytes, got);
+        }
+        Err(reason) => fail(s, gist_error(&name, &link, reason)),
     }
 }
 
@@ -217,12 +254,30 @@ fn write_cache(cache: &Path, text: &[u8]) -> Result<(), String> {
     })
 }
 
-/// Where the gist text of `link` (`git:<user>/<id>`) is cached: `<data_dir>/gist-cache/<user>_<id>`.
-/// `None` for anything else (user and id: ASCII letters, digits, `_` and `-`).
+/// Where the downloaded text of `link` is cached (keyed by loader and path): a gist
+/// (`git:<user>/<id>`, user and id ASCII letters, digits, `_` and `-`) at
+/// `<data_dir>/gist-cache/<user>_<id>`; a link of another loader CPM has (`gh`, `p`, `pb`, `ms`) at
+/// `<data_dir>/link-cache/<loader>/<path>`, every byte of the path but ASCII letters, digits, `-`
+/// and `_` written `~XX` (hex). `None` for anything else, or a path that would be over 160 bytes.
 pub fn cache_path(data_dir: &Path, link: &str) -> Option<PathBuf> {
-    let (user, id) = link.strip_prefix("git:")?.split_once('/')?;
-    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    (ok(user) && ok(id)).then(|| data_dir.join("gist-cache").join(format!("{user}_{id}")))
+    let (loader, path) = link.split_once(':')?;
+    if loader == "git" {
+        let (user, id) = path.split_once('/')?;
+        let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        return (ok(user) && ok(id)).then(|| data_dir.join("gist-cache").join(format!("{user}_{id}")));
+    }
+    if !["gh", "p", "pb", "ms"].contains(&loader) || cpm_core::link::link_urls(link).is_err() {
+        return None;
+    }
+    let mut file = String::new();
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+            file.push(b as char);
+        } else {
+            file.push_str(&format!("~{b:02X}"));
+        }
+    }
+    (file.len() <= 160).then(|| data_dir.join("link-cache").join(loader).join(file))
 }
 
 /// Sets the mod's data folder (`game.native_data_dir("cpm")`), where the gist cache is kept.
@@ -236,8 +291,8 @@ pub fn set_data_dir(dir: PathBuf) {
 struct Fetches {
     /// Links being downloaded (one download per link).
     in_flight: Vec<String>,
-    /// Downloads asked for and not yet started: (link, raw URL).
-    requests: Vec<(String, String)>,
+    /// Downloads asked for and not yet started: (link, its URLs in the order tried).
+    requests: Vec<(String, Vec<String>)>,
     /// Ended downloads not yet taken: (link, the gist text or why not).
     done: Vec<(String, Result<Vec<u8>, String>)>,
 }
@@ -250,25 +305,26 @@ fn fetches<R>(f: impl FnOnce(&mut Fetches) -> R) -> R {
     f(&mut FETCHES.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
-/// Asks for `link`'s gist text to be downloaded ([`take_fetch_requests`]); false (nothing
-/// changes) when it is already downloading, its text is waiting to be taken, or it is not a
-/// gist link. An earlier failure not yet taken is dropped: this is a new try.
+/// Asks for `link`'s text to be downloaded ([`take_fetch_requests`]); false (nothing changes)
+/// when it is already downloading, its text is waiting to be taken, or it is not a link CPM can
+/// download (`cpm_core::link::link_urls`). An earlier failure not yet taken is dropped: this is a
+/// new try.
 pub fn start_fetch(link: &str) -> bool {
-    let valid = cache_path(Path::new(""), link).is_some();
-    let Some(url) = cpm_core::link::gist_raw_url(link).filter(|_| valid) else { return false };
+    let Ok(urls) = cpm_core::link::link_urls(link) else { return false };
     fetches(|f| {
         if f.in_flight.iter().any(|l| l == link) || f.done.iter().any(|(l, r)| l == link && r.is_ok()) {
             return false;
         }
         f.done.retain(|(l, _)| l != link);
         f.in_flight.push(link.to_owned());
-        f.requests.push((link.to_owned(), url));
+        f.requests.push((link.to_owned(), urls));
         true
     })
 }
 
-/// The downloads asked for since the last call, (link, raw URL): the frame hook starts them.
-pub fn take_fetch_requests() -> Vec<(String, String)> {
+/// The downloads asked for since the last call, (link, its URLs in the order tried): the frame
+/// hook starts them.
+pub fn take_fetch_requests() -> Vec<(String, Vec<String>)> {
     fetches(|f| std::mem::take(&mut f.requests))
 }
 
@@ -668,11 +724,13 @@ pub struct Quads {
     pub quads: Vec<Quad>,
     /// The held and head items to draw with the model (none for the first-person arm).
     pub items: Vec<ItemDraw>,
+    /// Where the shoulder parrots go ([`parrot_draws`]; none for the first-person arm).
+    pub shoulders: Vec<ShoulderAnchor>,
 }
 
 impl Quads {
     fn new() -> Self {
-        Quads { sprites: vec![SPRITE.to_owned()], quads: Vec::new(), items: Vec::new() }
+        Quads { sprites: vec![SPRITE.to_owned()], quads: Vec::new(), items: Vec::new(), shoulders: Vec::new() }
     }
 
     /// The index of sprite `name`, added when new.
@@ -753,6 +811,13 @@ pub fn item_draws(anchors: &[ItemAnchor], skull: bool) -> Vec<ItemDraw> {
         .filter(|a| a.transform.determinant().abs() > 1e-9 && a.transform.is_finite())
         .map(|a| item_draw(a, skull))
         .collect()
+}
+
+/// The shoulder anchors a parrot is drawn at, leaving out one that flattens it to nothing (a zero
+/// render or mesh scale on its shoulder part), as [`item_draws`] does. The game draws a parrot
+/// only on a shoulder that has one (parrot_probe.rs).
+pub fn parrot_draws(anchors: &[ShoulderAnchor]) -> Vec<ShoulderAnchor> {
+    anchors.iter().filter(|a| a.transform.determinant().abs() > 1e-9 && a.transform.is_finite()).copied().collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -972,6 +1037,7 @@ fn posed_quads(worn: &Worn, pose: impl FnOnce(&mut LoadedModel) -> Posed) -> Opt
         let posed = pose(m);
         let mut quads = box_quads(m, &posed.boxes, worn);
         quads.items = item_draws(&posed.items, worn.skull);
+        quads.shoulders = parrot_draws(&posed.shoulders);
         quads
     })
 }
@@ -989,7 +1055,7 @@ pub fn quads(input: &PoseInput, worn: &Worn) -> Option<Quads> {
 /// The model's first-person arm (`left`, else the right one: [`LoadedModel::pose_arm`]) as
 /// quads; `None` as for [`quads`]. It wears nothing, as vanilla's first-person arm does not.
 pub fn arm_quads(left: bool) -> Option<Quads> {
-    posed_quads(&Worn::default(), |m| Posed { boxes: m.pose_arm(left), items: Vec::new() })
+    posed_quads(&Worn::default(), |m| Posed { boxes: m.pose_arm(left), items: Vec::new(), shoulders: Vec::new() })
 }
 
 /// Milliseconds since the first call: the animation clock.
@@ -1937,13 +2003,17 @@ pub fn load_preview(path: &Path, data_dir: Option<&Path>) -> Result<PreviewModel
     let desc = cpm_core::format::read_cpmmodel(&bytes).map_err(|e| cant(&e))?.desc;
     let model = match cpm_core::load(&bytes) {
         Ok(model) => model,
-        Err(cpm_core::CpmError::NeedsLink(link)) => {
-            let cache = data_dir.and_then(|d| cache_path(d, &link)).filter(|c| c.is_file());
-            let Some(cache) = cache else { return Err(NOT_CACHED.to_owned()) };
-            let read = |_: &str| {
+        Err(cpm_core::CpmError::NeedsLink(_)) => {
+            let read = |link: &str| {
+                let cache = data_dir.and_then(|d| cache_path(d, link)).filter(|c| c.is_file());
+                let Some(cache) = cache else { return Err(cpm_core::CpmError::NeedsLink(link.to_owned())) };
                 std::fs::read(&cache).map_err(|e| cpm_core::CpmError::Invalid(format!("cannot read the cache: {e}")))
             };
-            cpm_core::link::load_resolved(&bytes, &read).map_err(|e| cant(&e))?
+            match cpm_core::link::load_with_links(&bytes, &read) {
+                Ok(model) => model,
+                Err(cpm_core::CpmError::NeedsLink(_)) => return Err(NOT_CACHED.to_owned()),
+                Err(e) => return Err(cant(&e)),
+            }
         }
         Err(e) => return Err(cant(&e)),
     };

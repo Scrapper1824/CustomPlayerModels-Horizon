@@ -41,6 +41,8 @@ fn cpm_player_submit(
     // The cape layer: its swing, and none on an invisible player (cape_probe.rs).
     input.cape = crate::game::cpm_cape_probe::motion(game, player.partial);
     input.invisible = crate::game::cpm_cape_probe::invisible(game);
+    // PARROT_LEFT / PARROT_RIGHT (parrot_probe.rs).
+    [input.parrot_left, input.parrot_right] = crate::game::cpm_parrot_probe::on_shoulders(game);
     // The game leaves out its armour, elytra and cape layers for a player a mod drew: the model
     // draws them (its own armour, elytra and cape parts, else the vanilla pieces on its body).
     let mut worn = crate::game::cpm_equipment_probe::worn(game);
@@ -52,9 +54,11 @@ fn cpm_player_submit(
         return;
     };
     *drawn = crate::game::cpm_draw::quads_sorted(game, draw, &quads);
-    // The game leaves out its held item and head item layers too: the items go where the model
-    // holds them (its item parts, else its arms and head).
+    // The game leaves out its held item, head item and shoulder parrot layers too: the items go
+    // where the model holds them (its item parts, else its arms and head), the parrots on its
+    // shoulder parts (else where vanilla puts them).
     if *drawn {
         crate::game::cpm_item_probe::draw_items(game, draw, &quads.items, &held, player.id, player.walk_position);
+        crate::game::cpm_parrot_probe::draw_parrots(game, draw, &quads.shoulders, player.partial);
     }
 }
