@@ -1,5 +1,13 @@
 # CustomPlayerModels for Horizon
 
+> [!WARNING]
+> **Not every feature has been tested in game.** I don't have models that use every CPM feature, so some
+> features are checked only by automated tests. Animated textures, duplicated body parts, non-gist links and
+> models stored in a skin are among them. If a model looks or behaves differently than it does in real CPM, or
+> doesn't load, please [open an issue](https://github.com/Scrapper1824/CustomPlayerModels-Horizon/issues/new).
+> Include a screenshot and, if you can, the model file or a link to it. Your reports are how these features
+> get fixed.
+
 An unofficial port of [Customizable Player Models](https://github.com/tom5454/CustomPlayerModels) (CPM) by tom5454
 to [Horizon](https://github.com/horizon-rust/horizon), the Rust Minecraft client, as a Horizon **native mod**.
 
