@@ -14,7 +14,7 @@ fn sample(name: &str) -> PathBuf {
 }
 
 fn layer(sprite: &str, tint: u32) -> cpm::WornLayer {
-    cpm::WornLayer { sprite: sprite.into(), tint }
+    cpm::WornLayer { sprite: sprite.into(), tint, ..Default::default() }
 }
 
 fn sprites(layers: &[cpm::WornLayer]) -> Vec<&str> {
@@ -376,4 +376,151 @@ fn no_cape_texture_draws_nothing() {
     // Not under an elytra's wings.
     let wings = cpm::Worn { chest_has_wings: true, ..worn.clone() };
     assert!(cpm::quads(&caped, &wings).unwrap().quads.iter().all(|x| x.sprite == 0));
+}
+
+fn bare(item: &str, slot: ArmorSlot) -> Vec<(cpm::WornLayer, Option<String>)> {
+    cpm::armor_layers(item, slot, None).into_iter().map(|l| (l, None)).collect()
+}
+
+/// `EquipmentLayerRenderer.renderLayers` (Horizon's `armor_layers`): a foil stack's glint on its
+/// first layer and on its trim, nowhere else.
+#[test]
+fn glint_on_first_layer_and_trim_only() {
+    let leather = || bare("minecraft:leather_helmet", ArmorSlot::Helmet);
+    let foil = cpm::piece_layers(leather(), Some("trims/x".into()), true);
+    assert_eq!(
+        sprites(&foil),
+        vec!["entity/equipment/humanoid/leather", "entity/equipment/humanoid/leather_overlay", "trims/x"]
+    );
+    assert_eq!(foil.iter().map(|l| l.glint).collect::<Vec<_>>(), vec![true, false, true]);
+    assert!(foil.iter().all(|l| !l.emissive));
+    assert_eq!(foil[2].tint, 0xFF_FFFF);
+    let plain = cpm::piece_layers(leather(), Some("trims/x".into()), false);
+    assert!(plain.iter().all(|l| !l.glint));
+    // Without a trim, only the first layer.
+    let iron = bare("minecraft:iron_boots", ArmorSlot::Boots);
+    assert_eq!(cpm::piece_layers(iron, None, true).iter().map(|l| l.glint).collect::<Vec<_>>(), vec![true]);
+    // No layers: nothing, not even the trim.
+    assert!(cpm::piece_layers(Vec::new(), Some("trims/x".into()), true).is_empty());
+    // The corners' glint UVs follow `native_draw_quad`'s corner order.
+    assert_eq!(cpm::glint_corners([0.1, 0.2, 0.3, 0.4]), [[0.1, 0.2], [0.1, 0.4], [0.3, 0.4], [0.3, 0.2]]);
+
+    if common::missing(&["ReggieTheRat.cpmmodel"]) {
+        return;
+    }
+    cpm::select(Some(sample("ReggieTheRat.cpmmodel")));
+    cpm::ensure_loaded();
+    let helmet = redressed(BoxTexture::Armor(ArmorSlot::Helmet), [64, 32]);
+    let mut worn = cpm::Worn::default();
+    worn.armor[0] = cpm::piece_layers(leather(), Some("trims/x".into()), true);
+    let q = cpm::with_model(|m| cpm::box_quads(m, &[helmet.clone()], &worn)).unwrap();
+    let on = |i: usize| q.quads.iter().filter(|x| x.sprite == i).collect::<Vec<_>>();
+    assert_eq!((on(1).len(), on(2).len(), on(3).len()), (6, 6, 6));
+    // The glint samples the face's place in its own texture (the model UV the shader scrolls).
+    for (x, f) in on(1).iter().zip(helmet.faces.iter().flatten()) {
+        assert_eq!(x.glint, Some(cpm::own_uv(f.uv, [64, 32]).map(|t| t / 16.0)));
+    }
+    assert!(on(2).iter().all(|x| x.glint.is_none()));
+    assert!(on(3).iter().all(|x| x.glint.is_some()));
+    // A colour cube on the piece's root never glints (CPM draws it as RenderMode.COLOR, not in
+    // the submitted glint render type), nor does a glowing cube (RenderMode.GLOW), tinted or not.
+    let mut cube = helmet.clone();
+    cube.textured = false;
+    let q = cpm::with_model(|m| cpm::box_quads(m, &[cube], &worn)).unwrap();
+    assert!(q.quads.len() == 6 && q.quads.iter().all(|x| x.glint.is_none()));
+    let mut glowing = helmet.clone();
+    glowing.glow = true;
+    glowing.tint = 0x40_80C0;
+    let q = cpm::with_model(|m| cpm::box_quads(m, &[glowing], &worn)).unwrap();
+    assert!(q.quads.len() == 18 && q.quads.iter().all(|x| x.glint.is_none()));
+    // Nothing glints without foil.
+    worn.armor[0] = cpm::piece_layers(leather(), Some("trims/x".into()), false);
+    let q = cpm::with_model(|m| cpm::box_quads(m, &[helmet], &worn)).unwrap();
+    assert!(q.quads.iter().all(|x| x.glint.is_none()));
+}
+
+/// `WingsLayer` draws through `renderLayers`: an enchanted elytra glints whatever texture its
+/// wings take (CPM only swaps the texture), the model's own sheet included.
+#[test]
+fn glint_on_enchanted_elytra() {
+    if common::missing(&["ReggieTheRat.cpmmodel"]) {
+        return;
+    }
+    cpm::select(Some(sample("ReggieTheRat.cpmmodel")));
+    cpm::ensure_loaded();
+    let wing = redressed(BoxTexture::Elytra, [64, 32]);
+    let enchanted = cpm::Worn { elytra: true, elytra_sprite: Some(cpm::ELYTRA_SPRITE.into()), elytra_glint: true, ..Default::default() };
+    let plain = cpm::Worn { elytra_glint: false, ..enchanted.clone() };
+    for sheet in [None, Some(red_sheet(64, 32, [64, 32]))] {
+        let has_sheet = sheet.is_some();
+        cpm::with_model(|m| m.elytra = sheet).unwrap();
+        let q = cpm::with_model(|m| cpm::box_quads(m, &[wing.clone()], &enchanted)).unwrap();
+        assert_eq!(q.quads.len(), 6, "sheet {has_sheet}");
+        for (x, f) in q.quads.iter().zip(wing.faces.iter().flatten()) {
+            assert_eq!(x.glint, Some(cpm::own_uv(f.uv, [64, 32]).map(|t| t / 16.0)), "sheet {has_sheet}");
+        }
+        let q = cpm::with_model(|m| cpm::box_quads(m, &[wing.clone()], &plain)).unwrap();
+        assert!(q.quads.iter().all(|x| x.glint.is_none()), "sheet {has_sheet}");
+        // Nor a colour cube on the elytra root.
+        let mut cube = wing.clone();
+        cube.textured = false;
+        let q = cpm::with_model(|m| cpm::box_quads(m, &[cube], &enchanted)).unwrap();
+        assert!(q.quads.len() == 6 && q.quads.iter().all(|x| x.glint.is_none()), "sheet {has_sheet}");
+    }
+    // Armour boxes do not take the elytra's glint.
+    let chest = redressed(BoxTexture::Armor(ArmorSlot::Chestplate), [64, 32]);
+    let mut worn = enchanted.clone();
+    worn.armor[1] = cpm::armor_layers("minecraft:iron_chestplate", ArmorSlot::Chestplate, None);
+    let q = cpm::with_model(|m| cpm::box_quads(m, &[chest], &worn)).unwrap();
+    assert!(!q.quads.is_empty() && q.quads.iter().all(|x| x.glint.is_none()));
+}
+
+/// A layer with an OptiFine emissive overlay is drawn again with it right after, at full
+/// brightness as an ordinary face (not CPM's glow pass), without the glint.
+#[test]
+fn emissive_layer_full_bright_no_glint() {
+    let base = || layer("entity/equipment/humanoid/iron", 0x80_8080);
+    let e = Some("entity/equipment/humanoid/iron_e".to_owned());
+    let l = cpm::piece_layers(vec![(base(), e.clone())], Some("trims/x".into()), true);
+    assert_eq!(sprites(&l), vec!["entity/equipment/humanoid/iron", "entity/equipment/humanoid/iron_e", "trims/x"]);
+    assert_eq!(l.iter().map(|l| (l.glint, l.emissive)).collect::<Vec<_>>(), vec![(true, false), (false, true), (true, false)]);
+    // The overlay keeps its layer's colour.
+    assert_eq!(l[1].tint, 0x80_8080);
+
+    if common::missing(&["ReggieTheRat.cpmmodel"]) {
+        return;
+    }
+    cpm::select(Some(sample("ReggieTheRat.cpmmodel")));
+    cpm::ensure_loaded();
+    let mut helmet = redressed(BoxTexture::Armor(ArmorSlot::Helmet), [64, 32]);
+    helmet.glow = true;
+    let mut worn = cpm::Worn::default();
+    worn.armor[0] = l;
+    let q = cpm::with_model(|m| cpm::box_quads(m, &[helmet.clone()], &worn)).unwrap();
+    let on = |i: usize| q.quads.iter().filter(|x| x.sprite == i).copied().collect::<Vec<_>>();
+    assert_eq!(q.sprites[2], "entity/equipment/humanoid/iron_e");
+    assert!(on(2).len() == 6 && on(2).iter().all(|x| x.emissive && !x.glow && x.glint.is_none()));
+    assert!(on(1).iter().all(|x| !x.emissive && x.glow));
+    // Never in the additive glow pass.
+    let (_, additive) = cpm::split_glow(&on(2), cpm_core::glam::Mat4::IDENTITY);
+    assert!(additive.is_empty());
+
+    // The worn elytra's overlay, after its wings, only on the worn texture (not the model's sheet).
+    let wing = redressed(BoxTexture::Elytra, [64, 32]);
+    let worn = cpm::Worn {
+        elytra: true,
+        elytra_sprite: Some(cpm::ELYTRA_SPRITE.into()),
+        elytra_glint: true,
+        elytra_emissive: Some("entity/equipment/wings/elytra_e".into()),
+        ..Default::default()
+    };
+    cpm::with_model(|m| m.elytra = None).unwrap();
+    let q = cpm::with_model(|m| cpm::box_quads(m, &[wing.clone()], &worn)).unwrap();
+    assert_eq!(q.sprites, vec![cpm::SPRITE, cpm::ELYTRA_SPRITE, "entity/equipment/wings/elytra_e"]);
+    assert_eq!(q.quads.len(), 12);
+    assert!(q.quads[..6].iter().all(|x| x.sprite == 1 && x.glint.is_some() && !x.emissive));
+    assert!(q.quads[6..].iter().all(|x| x.sprite == 2 && x.glint.is_none() && x.emissive));
+    cpm::with_model(|m| m.elytra = Some(red_sheet(64, 32, [64, 32]))).unwrap();
+    let q = cpm::with_model(|m| cpm::box_quads(m, &[wing], &worn)).unwrap();
+    assert!(q.quads.len() == 6 && q.quads.iter().all(|x| x.sprite == 0 && !x.emissive));
 }

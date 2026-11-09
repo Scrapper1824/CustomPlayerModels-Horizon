@@ -261,6 +261,90 @@ fn clock_counts_from_the_first_call() {
 }
 
 #[test]
+fn animated_texture_frame_uploads_again() {
+    if common::missing(&["SkullDog.cpmmodel"]) {
+        return;
+    }
+    cpm::select(Some(sample("SkullDog.cpmmodel")));
+    cpm::ensure_loaded();
+    // A 1x1 region at (0, 0) showing frames along x from (1, 0), 100 ms each.
+    let first = cpm::with_model(|m| {
+        m.anim_textures = vec![cpm_core::anim::texture::AnimatedTexture::new(cpm_core::anim::texture::AnimTex {
+            sheet: 0,
+            uv_start: [0, 0],
+            uv_size: [1, 1],
+            anim_start: [1, 0],
+            frame_count: 2,
+            frame_time: 100,
+            an_x: true,
+            interpolate: false,
+        })];
+        let w = m.png_px[0] as usize;
+        m.texture_rgba[..4].copy_from_slice(&[1, 2, 3, 4]);
+        m.texture_rgba[4..8].copy_from_slice(&[10, 20, 30, 40]);
+        m.texture_rgba[8..12].copy_from_slice(&[50, 60, 70, 80]);
+        w
+    })
+    .unwrap();
+    assert!(first > 2);
+    let t0 = Instant::now();
+    assert_eq!(cpm::clock_ms(t0), 0);
+    assert!(cpm::texture_upload(t0).is_some());
+    // Frame 0 still: nothing changed, nothing sent.
+    cpm::tick_textures(t0 + Duration::from_millis(50));
+    assert!(cpm::texture_upload(t0 + Duration::from_millis(50)).is_none());
+    // Frame 1: its pixel is copied over the region and the image is sent at once.
+    cpm::tick_textures(t0 + Duration::from_millis(120));
+    let (_, _, rgba) = cpm::texture_upload(t0 + Duration::from_millis(120)).expect("upload on a new frame");
+    assert_eq!(&rgba[..4], &[50, 60, 70, 80]);
+    cpm::tick_textures(t0 + Duration::from_millis(150));
+    assert!(cpm::texture_upload(t0 + Duration::from_millis(150)).is_none());
+    // Back to frame 0.
+    cpm::tick_textures(t0 + Duration::from_millis(210));
+    let (_, _, rgba) = cpm::texture_upload(t0 + Duration::from_millis(210)).expect("upload on frame 0");
+    assert_eq!(&rgba[..4], &[10, 20, 30, 40]);
+}
+
+#[test]
+fn animated_texture_after_switching_to_a_bigger_model() {
+    if common::missing(&["SkullDog.cpmmodel", "ReggieTheRat.cpmmodel"]) {
+        return;
+    }
+    let t0 = Instant::now();
+    assert_eq!(cpm::clock_ms(t0), 0);
+    cpm::select(Some(sample("SkullDog.cpmmodel")));
+    cpm::ensure_loaded();
+    let (sw, sh, _) = cpm::texture_upload(t0).unwrap();
+    assert!(sw < 1000 && sh < 1000, "{sw}x{sh}");
+    // Switch (as the settings page does) to a model with a bigger, animated texture.
+    cpm::select(Some(sample("ReggieTheRat.cpmmodel")));
+    cpm::ensure_loaded();
+    cpm::with_model(|m| {
+        m.png_px = [1000, 1000];
+        m.texture_rgba = vec![0; 1000 * 1000 * 4];
+        m.texture_rgba[4..8].copy_from_slice(&[10, 20, 30, 40]);
+        m.texture_rgba[8..12].copy_from_slice(&[50, 60, 70, 80]);
+        m.anim_textures = vec![cpm_core::anim::texture::AnimatedTexture::new(cpm_core::anim::texture::AnimTex {
+            sheet: 0,
+            uv_start: [0, 0],
+            uv_size: [1, 1],
+            anim_start: [1, 0],
+            frame_count: 2,
+            frame_time: 100,
+            an_x: true,
+            interpolate: false,
+        })];
+    })
+    .unwrap();
+    // Frame 1 on its first tick: the old model's image must not be written into.
+    let t = t0 + Duration::from_millis(120);
+    cpm::tick_textures(t);
+    let (w, h, rgba) = cpm::texture_upload(t).expect("the new model uploads");
+    assert_eq!((w, h), (1004, 1000));
+    assert_eq!(&rgba[..4], &[50, 60, 70, 80]);
+}
+
+#[test]
 fn refused_upload_drops_the_model() {
     if common::missing(&["Expie_by_Clouddy.cpmproject", "ReggieTheRat.cpmmodel", "SkullDog.cpmmodel", "rainwing-old.cpmproject"]) {
         return;
@@ -645,7 +729,7 @@ fn convert_expie_writes_model() {
     let bytes = std::fs::read(&model).unwrap();
     assert!(cpm_core::load(&bytes).is_ok());
     let project = cpm_core::project::read_project(&std::fs::read(expie()).unwrap()).unwrap();
-    assert_eq!(description(&model), format!("{} (converted by CPM for Horizon, v3)", project.desc));
+    assert_eq!(description(&model), format!("{} (converted by CPM for Horizon, v4)", project.desc));
     assert!(!dir.join("Expie_by_Clouddy.gist.txt").exists());
     // Converting again overwrites it rather than making Expie_by_Clouddy_2.
     assert_eq!(cpm::convert_project(&expie(), &dir, 1024), result);
@@ -1535,7 +1619,11 @@ fn old_conversion_line_only_for_stale_models() {
     cpm::select(Some(with_desc(&dir, "V2.cpmmodel", "dog (converted by CPM for Horizon, v2)")));
     cpm::ensure_loaded();
     assert!(labels().contains(&"Old conversion: convert V2.cpmproject again".to_owned()), "{:?}", labels());
-    cpm::select(Some(with_desc(&dir, "Fresh.cpmmodel", "dog (converted by CPM for Horizon, v3)")));
+    // v3 lacked animated textures.
+    cpm::select(Some(with_desc(&dir, "V3.cpmmodel", "dog (converted by CPM for Horizon, v3)")));
+    cpm::ensure_loaded();
+    assert!(labels().contains(&"Old conversion: convert V3.cpmproject again".to_owned()), "{:?}", labels());
+    cpm::select(Some(with_desc(&dir, "Fresh.cpmmodel", "dog (converted by CPM for Horizon, v4)")));
     cpm::ensure_loaded();
     assert!(!stale(&labels()));
     cpm::select(Some(with_desc(&dir, "Other.cpmmodel", "dog")));
@@ -2143,10 +2231,10 @@ fn preview_holds_nothing() {
 }
 
 #[test]
-fn converter_version_is_3() {
-    // v3 carries the render scale and the first-person hand: earlier conversions are re-converted.
-    assert_eq!(cpm::CONVERTER_VERSION, 3);
-    assert_eq!(cpm::converted_version(&format!("x (converted by CPM for Horizon, v{})", cpm::CONVERTER_VERSION)), Some(3));
+fn converter_version_is_4() {
+    // v4 carries animated textures: earlier conversions are re-converted.
+    assert_eq!(cpm::CONVERTER_VERSION, 4);
+    assert_eq!(cpm::converted_version(&format!("x (converted by CPM for Horizon, v{})", cpm::CONVERTER_VERSION)), Some(4));
 }
 
 #[test]
@@ -2173,6 +2261,8 @@ fn quad_at(z: f32, tint: u32) -> cpm::Quad {
         uv: [0.0; 4],
         tint,
         glow: false,
+        emissive: false,
+        glint: None,
         sprite: 0,
     }
 }

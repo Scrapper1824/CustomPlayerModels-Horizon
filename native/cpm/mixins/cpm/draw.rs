@@ -1,28 +1,41 @@
 // The model's quads drawn with the game's `native_draw_quad`: what player_submit.rs and
 // first_person_arm.rs share. Added to the game as `game::cpm_draw`.
 
-/// Draws `quads` into `draw`, each with its sprite: a glowing one at full brightness, the others
-/// at `draw.light` (left as it was). False, with nothing drawn, when the atlas lacks the model's
-/// sprite ([`cpm_mod::SPRITE`](crate::game::cpm_mod::SPRITE)); a quad of a worn texture the atlas
-/// lacks is left out (the rest of the model still draws).
+/// Draws `quads` into `draw`, each with its sprite: a glowing or emissive one at full brightness,
+/// the others at `draw.light` (left as it was). False, with nothing drawn, when the atlas lacks the
+/// model's sprite ([`cpm_mod::SPRITE`](crate::game::cpm_mod::SPRITE)); a quad of a worn texture the
+/// atlas lacks is left out (the rest of the model still draws). The armour glint needs the drawn
+/// vertices: [`quads_sorted`] tags it.
 pub(super) fn quads(
     game: &crate::game::Game<'_>,
     draw: &mut crate::game::native_block_entity_draw::BlockEntityDraw,
     quads: &crate::game::cpm_mod::Quads,
 ) -> bool {
+    drawn_quads(game, draw, quads).is_some()
+}
+
+/// [`quads`], giving the glint rect of each quad drawn (four vertices each), in order.
+fn drawn_quads(
+    game: &crate::game::Game<'_>,
+    draw: &mut crate::game::native_block_entity_draw::BlockEntityDraw,
+    quads: &crate::game::cpm_mod::Quads,
+) -> Option<Vec<Option<[f32; 4]>>> {
     use crate::game::cpm_mod as cpm;
     if !game.gui.atlas.sprites.contains_key(cpm::SPRITE) {
-        return false;
+        return None;
     }
     let light = draw.light;
+    let mut drawn = Vec::with_capacity(quads.quads.len());
     for q in &quads.quads {
-        draw.light = if q.glow { cpm::FULL_BRIGHT } else { light };
+        draw.light = if q.glow || q.emissive { cpm::FULL_BRIGHT } else { light };
         let sprite = quads.sprites.get(q.sprite).map_or(cpm::SPRITE, String::as_str);
         // False only for a sprite the atlas lacks: that quad is skipped.
-        let _ = game.native_draw_quad(draw, sprite, q.corners, q.uv, q.tint);
+        if game.native_draw_quad(draw, sprite, q.corners, q.uv, q.tint) {
+            drawn.push(q.glint);
+        }
     }
     draw.light = light;
-    true
+    Some(drawn)
 }
 
 /// [`quads`] in the order CPM's `entityTranslucent` buffer is drawn ([`cpm_mod::back_to_front`]):
@@ -30,7 +43,9 @@ pub(super) fn quads(
 /// `BlockEntityDraw` keeps its pose to itself, so it is read back from a probe quad (the origin and
 /// the three unit axes; a quad's corners go through the pose and nothing else), the probe taken
 /// out, and the draw rebuilt with that pose, as `cpm_item_probe::draw_items` does. Falls back to
-/// [`quads`] in submission order when the probe cannot be drawn.
+/// [`quads`] when the probe cannot be drawn (only when the atlas lacks the model's sprite, so that
+/// draws nothing either). The glinting
+/// quads' vertices are then tagged with the armour glint ([`glint_pass`]).
 pub(super) fn quads_sorted(
     game: &crate::game::Game<'_>,
     draw: &mut crate::game::native_block_entity_draw::BlockEntityDraw,
@@ -59,13 +74,40 @@ pub(super) fn quads_sorted(
     let (solid, additive) = cpm::split_glow(&quads.quads, core_pose);
     let mut sorted = cpm::Quads { quads: solid, ..quads.clone() };
     cpm::back_to_front(&mut sorted.quads, core_pose);
-    if !crate::game::cpm_draw::quads(game, draw, &sorted) {
+    let start = n - 4;
+    let Some(glints) = drawn_quads(game, draw, &sorted) else {
         return false;
+    };
+    if glints.iter().any(Option::is_some) {
+        glint_pass(draw, start, &glints, (partial, game_time, light, block, pose, lights));
     }
     if !additive.is_empty() {
         glow_pass(game, draw, quads, additive, (partial, game_time, light, block, pose, lights));
     }
     true
+}
+
+/// Horizon's armour glint (`mobs::render::ARMOR_GLINT`, `EquipmentLayerRenderer.renderLayers`'
+/// foil): the overlay on the glinting quads' vertices (from `start`, four a quad drawn, `glints`
+/// in order), each with its place in its own texture as the `glint_uv` entity.wgsl scrolls the
+/// glint by. The draw is rebuilt around them as [`quads_sorted`] does.
+fn glint_pass(
+    draw: &mut crate::game::native_block_entity_draw::BlockEntityDraw,
+    start: usize,
+    glints: &[Option<[f32; 4]>],
+    (partial, game_time, light, block, pose, lights): (f32, i64, u32, [i32; 3], glam::Mat4, (glam::Vec3, glam::Vec3)),
+) {
+    use crate::game::native_block_entity_draw::BlockEntityDraw;
+    let empty = BlockEntityDraw::posed(partial, game_time, light, block, pose, lights, Vec::new());
+    let mut verts = std::mem::replace(draw, empty).into_vertices();
+    for (quad, glint) in verts[start..].chunks_mut(4).zip(glints) {
+        let Some(rect) = glint else { continue };
+        for (v, uv) in quad.iter_mut().zip(crate::game::cpm_mod::glint_corners(*rect)) {
+            v.layer = v.layer & !0xffff | horizon_client::mobs::render::ARMOR_GLINT;
+            v.glint_uv = uv;
+        }
+    }
+    *draw = BlockEntityDraw::posed(partial, game_time, light, block, pose, lights, verts);
 }
 
 /// CPM's eyes layer for the untinted glowing faces (`CustomRenderTypes.EYES`: additive, no depth

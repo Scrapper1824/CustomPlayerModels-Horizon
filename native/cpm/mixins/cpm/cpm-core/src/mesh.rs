@@ -19,9 +19,10 @@
 use glam::{Mat4, Vec3};
 
 use crate::anim::engine::{CapeState, Engine, Frame, PartDelta, PoseInput};
+use crate::anim::texture::{AnimatedTexture, SHEET_SKIN};
 use crate::anim::{decode_legacy, decode_new, AnimSet};
 use crate::effects::{FaceUv, TransformCopy};
-use crate::format::{read_cpmmodel, ModelFile, SkinType};
+use crate::format::{read_cpmmodel, ModelFile, SkinType, SHEET_CAPE, SHEET_ELYTRA};
 use crate::io::{CpmError, Result};
 use crate::model::{ExtraRoot, ItemPart, Model, Node, PartTransform, RootType, BONE_COUNT};
 
@@ -193,6 +194,9 @@ pub struct LoadedModel {
     pub elytra: Option<Sheet>,
     /// The model's own cape sheet, if it has one ([`BoxTexture::Cape`]).
     pub cape: Option<Sheet>,
+    /// The model's animated textures ([`Model::anim_textures`]), with their state; applied to
+    /// `texture_rgba`, `cape` and `elytra` by [`LoadedModel::tick_textures`].
+    pub anim_textures: Vec<AnimatedTexture>,
 }
 
 /// Decodes a `.cpmmodel` file.
@@ -227,9 +231,11 @@ impl LoadedModel {
         };
         let elytra = sheet(&model.elytra_texture)?;
         let cape = sheet(&model.cape_texture)?;
+        let anim_textures = model.anim_textures.iter().map(|&t| AnimatedTexture::new(t)).collect();
         Ok(LoadedModel {
             elytra,
             cape,
+            anim_textures,
             name: file.name,
             texture_px: model.texture_size,
             png_px,
@@ -237,6 +243,29 @@ impl LoadedModel {
             engine: Engine::new(set),
             model,
         })
+    }
+
+    /// `AnimationRegistry.tickAnimated` at `time_ms`: copies each animated texture's frame into
+    /// its sheet (the skin, cape or elytra; another sheet, or one the model lacks, is skipped).
+    /// True when a sheet's pixels changed (the image needs uploading again).
+    pub fn tick_textures(&mut self, time_ms: u64) -> bool {
+        let mut changed = false;
+        for a in &mut self.anim_textures {
+            let (rgba, size) = match a.tex.sheet {
+                SHEET_SKIN => (&mut self.texture_rgba, self.png_px),
+                SHEET_CAPE => match &mut self.cape {
+                    Some(s) => (&mut s.rgba, s.png_px),
+                    None => continue,
+                },
+                SHEET_ELYTRA => match &mut self.elytra {
+                    Some(s) => (&mut s.rgba, s.png_px),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            changed |= a.update(time_ms, rgba, size);
+        }
+        changed
     }
 
     /// Advances the animation to `input.time_ms` and returns the posed boxes (worn armour and

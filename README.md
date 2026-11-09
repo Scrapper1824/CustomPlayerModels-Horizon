@@ -31,8 +31,8 @@ It also converts `.cpmproject` files from the CPM editor into `.cpmmodel` files.
 | Other link types | 🟢 | 🟢 |
 | Extruded parts | 🟢 | 🟢 |
 | Duplicated root parts | 🟢 | 🟢 |
-| Animated textures | 🟢 | 🔴 |
-| Enchantment glint, emissive and modded armour | 🟢 | 🔴 |
+| Animated textures | 🟢 | 🟢 |
+| Enchantment glint, emissive and custom (resource-pack / CIT) armour | 🟢 | 🟢 |
 | Parrots on shoulder parts (tool and any-slot parts draw nothing, as in CPM) | 🟢 | 🟢 |
 | Models on player heads (skulls) | 🟢 | 🔴 |
 | Model stored in the skin file | 🟢 | 🔴 |
@@ -113,7 +113,7 @@ The full guide, with every setting, the gist flow and the known differences from
 python native/tools/native.py package cpm
 ```
 
-This writes `native/target/cpm-0.1.3.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
+This writes `native/target/cpm-0.1.4.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
 straight into the game:
 
 ```sh

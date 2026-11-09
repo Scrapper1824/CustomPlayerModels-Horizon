@@ -114,6 +114,8 @@ pub fn ensure_loaded() {
         s.model = None;
         s.error = None;
         s.uploaded = None;
+        // The image is the old model's: made again for the new one (never patched).
+        s.composed = None;
         s.waiting = None;
         s.restore_pending = false;
         s.params_saved = None;
@@ -568,25 +570,11 @@ fn compose(s: &mut State) -> Option<Composed> {
     }
     let w = size[0];
     let mut rgba = vec![0u8; (size[0] * size[1] * 4) as usize];
-    let mut put = |model: &LoadedModel, base: [u32; 2]| {
-        let c = model_composite(model);
-        blit(&mut rgba, w, base, &model.texture_rgba, model.png_px);
-        for y in 0..WHITE_PX {
-            let at = (((base[1] + y) * w + base[0] + c.white[0]) * 4) as usize;
-            rgba[at..at + (WHITE_PX * 4) as usize].fill(255);
-        }
-        if let (Some(at), Some(e)) = (c.elytra, elytra_sheet(model)) {
-            blit(&mut rgba, w, add2(base, at), &e.rgba, e.png_px);
-        }
-        if let (Some(at), Some(e)) = (c.cape, cape_sheet(model)) {
-            blit(&mut rgba, w, add2(base, at), &e.rgba, e.png_px);
-        }
-    };
     if let Some(model) = s.model.as_ref() {
-        put(model, [0, 0]);
+        put_model(&mut rgba, w, model, [0, 0]);
     }
     if let (Some(at), Some(m)) = (layout.preview_at, preview) {
-        put(m, at);
+        put_model(&mut rgba, w, m, at);
     }
     let mut placed = vec![None; picker.map_or(0, |p| p.files.len())];
     for ((i, icon), at) in icons.iter().zip(&layout.icon_at) {
@@ -598,6 +586,71 @@ fn compose(s: &mut State) -> Option<Composed> {
         }
     }
     Some(Composed { size, rgba, layout, icons: placed })
+}
+
+/// Puts `model`'s part of the image ([`composite`]) into `rgba` (`w` pixels wide) at `base`.
+fn put_model(rgba: &mut [u8], w: u32, model: &LoadedModel, base: [u32; 2]) {
+    let c = model_composite(model);
+    blit(rgba, w, base, &model.texture_rgba, model.png_px);
+    for y in 0..WHITE_PX {
+        let at = (((base[1] + y) * w + base[0] + c.white[0]) * 4) as usize;
+        rgba[at..at + (WHITE_PX * 4) as usize].fill(255);
+    }
+    if let (Some(at), Some(e)) = (c.elytra, elytra_sheet(model)) {
+        blit(rgba, w, add2(base, at), &e.rgba, e.png_px);
+    }
+    if let (Some(at), Some(e)) = (c.cape, cape_sheet(model)) {
+        blit(rgba, w, add2(base, at), &e.rgba, e.png_px);
+    }
+}
+
+/// Puts `model`'s part into the image `c` at `base` when it fits there; false (nothing written)
+/// when it does not (the image was made for another model).
+fn patch(c: &mut Composed, model: &LoadedModel, base: [u32; 2]) -> bool {
+    let [pw, ph] = model_composite(model).size;
+    let fits = base[0] + pw <= c.size[0] && base[1] + ph <= c.size[1] && c.rgba.len() == (c.size[0] * c.size[1] * 4) as usize;
+    if fits {
+        put_model(&mut c.rgba, c.size[0], model, base);
+    }
+    fits
+}
+
+/// Runs the animated textures ([`LoadedModel::tick_textures`]) of the selected model and of the
+/// picker's previewed one at the animation clock ([`clock_ms`]) `now`. A model whose pixels
+/// changed has its part of the image put in again, and the image is sent at the next
+/// [`texture_upload`]; otherwise nothing is sent.
+pub fn tick_textures(now: Instant) {
+    let time = clock_ms(now);
+    STATE.with_borrow_mut(|s| {
+        let model = s.model.as_mut().is_some_and(|m| m.tick_textures(time));
+        let preview = match s.picker.as_mut().map(|p| &mut p.preview) {
+            Some(Preview::Ready(p)) => p.model.tick_textures(time),
+            _ => false,
+        };
+        if !model && !preview {
+            return;
+        }
+        s.upload_due = true;
+        // Only an image made for the model shown now is patched (a model that has not reached
+        // the game yet gets a new one at the next upload anyway); else it is made again.
+        let current = s.model.is_none() || s.uploaded.is_some();
+        let Some(c) = s.composed.as_mut().filter(|_| current) else {
+            s.composed = None;
+            return;
+        };
+        let mut patched = true;
+        if model && let Some(m) = s.model.as_ref() {
+            patched &= patch(c, m, [0, 0]);
+        }
+        if preview
+            && let (Some(at), Some(Picker { preview: Preview::Ready(p), .. })) = (c.layout.preview_at, s.picker.as_ref())
+        {
+            patched &= patch(c, &p.model, at);
+        }
+        if !patched {
+            s.composed = None;
+        }
+    })
 }
 
 /// Runs `f` on the loaded model; `None` when there is none.
@@ -658,10 +711,22 @@ pub struct Quad {
     pub uv: [f32; 4],
     /// 0xRRGGBB.
     pub tint: u32,
-    /// Drawn at [`FULL_BRIGHT`].
+    /// Drawn at [`FULL_BRIGHT`] (CPM's glow: the additive pass when untinted, [`split_glow`]).
     pub glow: bool,
+    /// An OptiFine emissive overlay ([`WornLayer::emissive`]): drawn at [`FULL_BRIGHT`] as an
+    /// ordinary face, never in the glow pass.
+    pub emissive: bool,
+    /// The armour glint (`mobs::render::ARMOR_GLINT`), with the face's place in its own texture
+    /// (`[u0, v0, u1, v1]`, 0 to 1: the model UV the shader scrolls the glint by).
+    pub glint: Option<[f32; 4]>,
     /// Index into [`Quads::sprites`] of the sprite it samples (0: [`SPRITE`]).
     pub sprite: usize,
+}
+
+/// A glint rect's UV at each of a quad's corners, in `native_draw_quad`'s corner order (TL, BL,
+/// BR, TR: `[u0, v0]`, `[u0, v1]`, `[u1, v1]`, `[u1, v0]`), for the vertices' `glint_uv`.
+pub fn glint_corners([u0, v0, u1, v1]: [f32; 4]) -> [[f32; 2]; 4] {
+    [[u0, v0], [u0, v1], [u1, v1], [u1, v0]]
 }
 
 /// Orders `quads` as Minecraft draws an `entityTranslucent` buffer, which CPM draws models with
@@ -824,11 +889,38 @@ pub fn parrot_draws(anchors: &[ShoulderAnchor]) -> Vec<ShoulderAnchor> {
 // Worn armour and elytra
 
 /// One texture of a worn armour piece: an atlas sprite drawn over the piece's boxes, times `tint`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WornLayer {
     pub sprite: String,
     /// 0xRRGGBB.
     pub tint: u32,
+    /// Drawn with the armour glint (a foil stack's first layer and trim: [`piece_layers`]).
+    pub glint: bool,
+    /// An OptiFine emissive overlay: drawn at full brightness, without the glint.
+    pub emissive: bool,
+}
+
+/// One worn armour piece's layers as Horizon's `armor_layers` draws them
+/// (`EquipmentLayerRenderer.renderLayers`): each of `layers` in turn, the first with the glint
+/// when the stack `foil`s (`hasFoil`), each followed by its OptiFine emissive overlay when it has
+/// one (the atlas sprite: full bright, its layer's colour, no glint), then the `trim` (untinted,
+/// with the glint when foil). No layers, nothing (not even the trim).
+pub fn piece_layers(layers: Vec<(WornLayer, Option<String>)>, trim: Option<String>, foil: bool) -> Vec<WornLayer> {
+    let mut out = Vec::new();
+    if layers.is_empty() {
+        return out;
+    }
+    for (i, (layer, emissive)) in layers.into_iter().enumerate() {
+        let tint = layer.tint;
+        out.push(WornLayer { glint: foil && i == 0, emissive: false, ..layer });
+        if let Some(sprite) = emissive {
+            out.push(WornLayer { sprite, tint, glint: false, emissive: true });
+        }
+    }
+    if let Some(sprite) = trim {
+        out.push(WornLayer { sprite, tint: 0xFF_FFFF, glint: foil, emissive: false });
+    }
+    out
 }
 
 /// What the local player wears, as the model draws it (the game side fills it:
@@ -843,6 +935,12 @@ pub struct Worn {
     /// Its texture in the atlas, when the atlas has one (a CIT rule's, the player's cape, else the
     /// elytra's own).
     pub elytra_sprite: Option<String>,
+    /// The worn elytra `hasFoil()`: its wings glint (`WingsLayer` through `renderLayers`), on
+    /// whatever texture they take.
+    pub elytra_glint: bool,
+    /// The elytra texture's OptiFine emissive overlay in the atlas (none when the wings take the
+    /// player's cape), drawn over wings in [`Worn::elytra_sprite`] at full brightness.
+    pub elytra_emissive: Option<String>,
     /// A skull or head is in the head slot ([`Equipment::skull`]).
     pub skull: bool,
     /// The player's cape in the atlas, when it has one the atlas holds.
@@ -932,11 +1030,11 @@ pub fn armor_layers(item: &str, slot: ArmorSlot, dyed: Option<u32>) -> Vec<WornL
     let kind = armor_kind(slot);
     let base = format!("entity/equipment/{kind}/{asset}");
     if asset != "leather" {
-        return vec![WornLayer { sprite: base, tint: 0xFF_FFFF }];
+        return vec![WornLayer { sprite: base, tint: 0xFF_FFFF, ..Default::default() }];
     }
     vec![
-        WornLayer { sprite: base, tint: dyed.unwrap_or(LEATHER_UNDYED) & 0xFF_FFFF },
-        WornLayer { sprite: format!("entity/equipment/{kind}/leather_overlay"), tint: 0xFF_FFFF },
+        WornLayer { sprite: base, tint: dyed.unwrap_or(LEATHER_UNDYED) & 0xFF_FFFF, ..Default::default() },
+        WornLayer { sprite: format!("entity/equipment/{kind}/leather_overlay"), tint: 0xFF_FFFF, ..Default::default() },
     ]
 }
 
@@ -948,11 +1046,29 @@ pub fn mul_rgb(a: u32, b: u32) -> u32 {
 
 /// How one pass over a box samples.
 #[derive(Clone, Copy)]
-enum Pass {
+enum Sample {
     /// [`SPRITE`]: the image at this pixel position, of this real size.
     Slot([u32; 2], [u32; 2]),
     /// A sprite of its own (index into [`Quads::sprites`]), times a tint.
     Own(usize, u32),
+}
+
+/// One pass over a box: how it samples, with the armour glint, as an emissive overlay.
+#[derive(Clone, Copy)]
+struct Pass {
+    sample: Sample,
+    glint: bool,
+    emissive: bool,
+}
+
+impl Pass {
+    fn slot(at: [u32; 2], png: [u32; 2], glint: bool) -> Self {
+        Pass { sample: Sample::Slot(at, png), glint, emissive: false }
+    }
+
+    fn own(sprite: usize, tint: u32, glint: bool) -> Self {
+        Pass { sample: Sample::Own(sprite, tint), glint, emissive: false }
+    }
 }
 
 /// `boxes` (posed from `model`) as quads: each face's corners through its box's transform, its
@@ -970,7 +1086,10 @@ pub fn box_quads(model: &LoadedModel, boxes: &[PosedBox], worn: &Worn) -> Quads 
             for face in b.faces.iter().flatten() {
                 let corners = face.corners.map(|c| b.transform.transform_point3(c.into()).to_array());
                 let (uv, sprite, tint) = pass.map(model, b, face, [0, 0]);
-                out.quads.push(Quad { corners, uv, tint, glow: b.glow, sprite });
+                // The glint scrolls by the face's place in its own texture. None on a glowing box
+                // (CPM's RenderMode.GLOW draws in its own render type, never the glint's).
+                let glint = (pass.glint && !b.glow).then(|| own_uv(face.uv, b.texture_px).map(|t| t / 16.0));
+                out.quads.push(Quad { corners, uv, tint, glow: b.glow && !pass.emissive, emissive: pass.emissive, glint, sprite });
             }
         }
     }
@@ -979,37 +1098,48 @@ pub fn box_quads(model: &LoadedModel, boxes: &[PosedBox], worn: &Worn) -> Quads 
 
 /// The passes box `b` is drawn in (into `passes`, cleared first), adding the sprites they sample
 /// to `out`: skin boxes and the model's elytra sheet sample [`SPRITE`] (an untextured box the
-/// white patch); armour boxes take each of their slot's [`Worn`] layers in turn, elytra boxes
-/// without the model's sheet the worn elytra's sprite. None for a box with nothing to sample.
+/// white patch); armour boxes take each of their slot's [`Worn`] layers in turn (with their glint
+/// and emissive overlays), elytra boxes without the model's sheet the worn elytra's sprite and its
+/// emissive overlay. An enchanted elytra's textured boxes glint on either (colour cubes never do).
+/// None for a box with nothing to sample.
 /// `base`: where the model's image ([`composite`]) is in [`SPRITE`] (the selected model's at the
 /// top left, the picker's previewed one where [`slot_layout`] put it).
 fn box_passes(model: &LoadedModel, b: &PosedBox, worn: &Worn, base: [u32; 2], out: &mut Quads, passes: &mut Vec<Pass>) {
     passes.clear();
     match b.texture {
-        // A colour cube: the white patch times its colour, whatever it is worn on.
-        _ if !b.textured => passes.push(Pass::Slot(base, model.png_px)),
-        BoxTexture::Skin => passes.push(Pass::Slot(base, model.png_px)),
+        // A colour cube: the white patch times its colour, whatever it is worn on. Never the glint:
+        // CPM draws it as RenderMode.COLOR, not in the armour's (glint) render type.
+        _ if !b.textured => passes.push(Pass::slot(base, model.png_px, false)),
+        BoxTexture::Skin => passes.push(Pass::slot(base, model.png_px, false)),
         BoxTexture::Armor(slot) => {
             for l in &worn.armor[slot_index(slot)] {
-                passes.push(Pass::Own(out.sprite(&l.sprite), l.tint));
+                let pass = Pass::own(out.sprite(&l.sprite), l.tint, l.glint && !l.emissive);
+                passes.push(Pass { emissive: l.emissive, ..pass });
             }
         }
+        // WingsLayer: the glint on any texture (CPM only swaps it); the emissive overlay only
+        // over the elytra's own texture (OptiFine finds none for the model's).
         BoxTexture::Elytra => match (elytra_sheet(model), model_composite(model).elytra, &worn.elytra_sprite) {
-            (Some(e), Some(at), _) => passes.push(Pass::Slot(add2(base, at), e.png_px)),
-            (_, _, Some(sprite)) => passes.push(Pass::Own(out.sprite(sprite), 0xFF_FFFF)),
+            (Some(e), Some(at), _) => passes.push(Pass::slot(add2(base, at), e.png_px, worn.elytra_glint)),
+            (_, _, Some(sprite)) => {
+                passes.push(Pass::own(out.sprite(sprite), 0xFF_FFFF, worn.elytra_glint));
+                if let Some(e) = &worn.elytra_emissive {
+                    passes.push(Pass { emissive: true, ..Pass::own(out.sprite(e), 0xFF_FFFF, false) });
+                }
+            }
             _ => {}
         },
         // CapeLayerMixin: the model's cape sheet, else the player's cape; Java's template cape
         // (no cape at all) is not shipped, so nothing.
         BoxTexture::Cape => match (cape_sheet(model), model_composite(model).cape, &worn.cape_sprite) {
-            (Some(e), Some(at), _) => passes.push(Pass::Slot(add2(base, at), e.png_px)),
-            (_, _, Some(sprite)) => passes.push(Pass::Own(out.sprite(sprite), 0xFF_FFFF)),
+            (Some(e), Some(at), _) => passes.push(Pass::slot(add2(base, at), e.png_px, false)),
+            (_, _, Some(sprite)) => passes.push(Pass::own(out.sprite(sprite), 0xFF_FFFF, false)),
             _ => {}
         },
         // Vanilla's CapeLayer: the player's cape only.
         BoxTexture::PlayerCape => {
             if let Some(sprite) = &worn.cape_sprite {
-                passes.push(Pass::Own(out.sprite(sprite), 0xFF_FFFF));
+                passes.push(Pass::own(out.sprite(sprite), 0xFF_FFFF, false));
             }
         }
     }
@@ -1019,10 +1149,10 @@ impl Pass {
     /// Face `face` of box `b` in this pass: its UV (sprite texels), sprite index and 0xRRGGBB tint
     /// (`base` as for [`box_passes`]).
     fn map(self, model: &LoadedModel, b: &PosedBox, face: &cpm_core::FaceQuad, base: [u32; 2]) -> ([f32; 4], usize, u32) {
-        match self {
+        match self.sample {
             _ if !b.textured => (white_uv_at(add2(base, model_composite(model).white)), 0, b.tint),
-            Pass::Slot(at, png) => (slot_uv(face.uv, b.texture_px, png, at), 0, b.tint),
-            Pass::Own(i, tint) => (own_uv(face.uv, b.texture_px), i, mul_rgb(b.tint, tint)),
+            Sample::Slot(at, png) => (slot_uv(face.uv, b.texture_px, png, at), 0, b.tint),
+            Sample::Own(i, tint) => (own_uv(face.uv, b.texture_px), i, mul_rgb(b.tint, tint)),
         }
     }
 }
@@ -1752,7 +1882,9 @@ fn preview_box_quads_at(
                 corners.reverse();
                 uv.reverse();
             }
-            quads.push((depth, PreviewQuad { corners, uv, sprite, color: gui_color(tint, f.shade) }));
+            // An emissive overlay is full bright (the GUI draws no glint).
+            let shade = if pass.emissive { 1.0 } else { f.shade };
+            quads.push((depth, PreviewQuad { corners, uv, sprite, color: gui_color(tint, shade) }));
         }
     }
     // Far to near (stable: a box's passes stay in order).
@@ -2542,8 +2674,9 @@ pub enum ConvertResult {
 }
 
 /// The converter's version, written into every model's description. Version 1 (no number in the
-/// marker) lacked the armour parts; version 2 the render scale and the first-person hand.
-pub const CONVERTER_VERSION: u32 = 3;
+/// marker) lacked the armour parts; version 2 the render scale and the first-person hand;
+/// version 3 animated textures.
+pub const CONVERTER_VERSION: u32 = 4;
 
 /// Ends the description of every version 1 model; later ones end `, v<N>)` instead.
 pub const CONVERTED_MARKER: &str = " (converted by CPM for Horizon)";

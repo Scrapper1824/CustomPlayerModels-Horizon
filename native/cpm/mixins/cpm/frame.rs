@@ -34,6 +34,8 @@ fn cpm_frame(game: &mut crate::game::Game<'_>) {
     }
     // The Models picker's reads (its icons, the clicked model) that ended: the image changes.
     cpm::poll_picker();
+    // Animated textures: a frame that changed pixels makes the image due.
+    cpm::tick_textures(std::time::Instant::now());
     if let Some((width, height, rgba)) = cpm::texture_upload(std::time::Instant::now())
         && !game.native_mod_image(width, height, &rgba)
     {

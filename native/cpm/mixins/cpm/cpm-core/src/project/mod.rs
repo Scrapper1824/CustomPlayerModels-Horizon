@@ -13,8 +13,9 @@ use std::io::{Cursor, Read};
 
 use serde_json::{Map, Value};
 
+use crate::anim::texture::{AnimTex, SHEET_SKIN};
 use crate::effects::PartTransform;
-use crate::format::SkinType;
+use crate::format::{SkinType, SHEET_CAPE, SHEET_ELYTRA};
 use crate::io::{CpmError, Result};
 
 pub use anims::{AnimKind, FrameComponent, ProjectAnim, ProjectFrame};
@@ -49,6 +50,9 @@ pub struct Project {
     pub cape_png: Option<Vec<u8>>,
     /// Declared cape grid size: `capeSize`, else `TextureSheetType.CAPE` default 64x32.
     pub cape_size: [u32; 2],
+    /// The animated textures (`textures.<sheet>.anim`) of the skin, cape and elytra sheets the
+    /// project has an image for, by sheet (skin, cape, elytra), each in file order.
+    pub anim_textures: Vec<AnimTex>,
     pub hide_head_if_skull: bool,
     /// `removeArmorOffset`, default: no root is duplicated.
     pub remove_armor_offset: bool,
@@ -104,14 +108,6 @@ pub fn read_project(zip_bytes: &[u8]) -> Result<Project> {
     }
     let skin_size = vec2i(config.get("skinSize"), [64, 64]);
     let skin_size = [skin_size[0].max(0) as u32, skin_size[1].max(0) as u32];
-    if let Some(tex) = obj(config.get("textures")) {
-        for (name, dt) in tex {
-            let anims = obj(Some(dt)).and_then(|d| d.get("anim")).and_then(Value::as_array);
-            if anims.is_some_and(|a| !a.is_empty()) {
-                warnings.push(format!("animated {name} textures are not converted"));
-            }
-        }
-    }
     // TexturesLoaderV1 for the CAPE and ELYTRA sheets: `<name>.png` and `<name>Size`.
     let mut sheet = |name: &str| -> Result<(Option<Vec<u8>>, [u32; 2])> {
         let mut png = files.get(&format!("{name}.png"))?;
@@ -130,6 +126,22 @@ pub fn read_project(zip_bytes: &[u8]) -> Result<Project> {
     };
     let (elytra_png, elytra_size) = sheet("elytra")?;
     let (cape_png, cape_size) = sheet("cape")?;
+    // TexturesLoaderV1.loadAnimatedTexture: `textures.<name>.anim` of each editable sheet whose
+    // image loaded. The list icon's are not converted (its sheet is not).
+    let mut anim_textures = Vec::new();
+    let tex = obj(config.get("textures"));
+    for (name, sheet, has) in [
+        ("skin", SHEET_SKIN, true),
+        ("cape", SHEET_CAPE, cape_png.is_some()),
+        ("elytra", SHEET_ELYTRA, elytra_png.is_some()),
+    ] {
+        if has {
+            anim_textures.extend(animated_textures(tex, name).map(|m| anim_tex(sheet, m)));
+        }
+    }
+    if files.has("list_icon.png") && animated_textures(tex, "list_icon").next().is_some() {
+        warnings.push("animated list_icon textures are not converted".into());
+    }
     if files.has("list_icon.png") {
         warnings.push("list_icon.png texture is not converted".into());
     }
@@ -247,6 +259,7 @@ pub fn read_project(zip_bytes: &[u8]) -> Result<Project> {
         elytra_size,
         cape_png,
         cape_size,
+        anim_textures,
         hide_head_if_skull,
         remove_armor_offset,
         remove_bed_offset,
@@ -334,6 +347,31 @@ fn png_size(png: &[u8]) -> Result<[u32; 2]> {
 // JSON accessors mirroring `JsonMap`'s getters. Numbers may be written as ints or floats.
 
 pub(crate) type JMap = Map<String, Value>;
+
+/// The `anim` list of `textures.<name>`: its objects.
+fn animated_textures<'a>(tex: Option<&'a JMap>, name: &str) -> impl Iterator<Item = &'a JMap> {
+    obj(tex.and_then(|t| t.get(name)))
+        .and_then(|d| d.get("anim"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+}
+
+/// `AnimatedTex(Editor, TextureSheetType, JsonMap)`.
+fn anim_tex(sheet: u8, m: &JMap) -> AnimTex {
+    let m = Some(m);
+    AnimTex {
+        sheet,
+        uv_start: vec2i(get(m, "start"), [0, 0]),
+        uv_size: vec2i(get(m, "size"), [0, 0]),
+        anim_start: vec2i(get(m, "from"), [0, 0]),
+        frame_count: int(m, "frameCount", 0),
+        frame_time: int(m, "frameTime", 0),
+        an_x: boolean(m, "anX", false),
+        interpolate: boolean(m, "interpolate", false),
+    }
+}
 
 pub(crate) fn obj(v: Option<&Value>) -> Option<&JMap> {
     v.and_then(Value::as_object)

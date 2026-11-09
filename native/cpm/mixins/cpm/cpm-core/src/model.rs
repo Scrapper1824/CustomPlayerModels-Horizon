@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 pub use crate::effects::PartTransform;
+use crate::anim::texture::AnimTex;
 use crate::effects::{decode_effects, Effect, FaceUv, TransformCopy};
 use crate::format::{RawModel, RawTexture, SkinType};
 use crate::io::{CpmError, Result};
@@ -229,6 +230,8 @@ pub struct Model {
     pub elytra_texture: Option<RawTexture>,
     /// The model's own cape sheet (`TEXTURE` of type `CAPE`), if any.
     pub cape_texture: Option<RawTexture>,
+    /// The `ANIMATED_TEX` parts, in file order.
+    pub anim_textures: Vec<AnimTex>,
     /// Non-player roots (armour, elytra, cape), in file order.
     pub extra_roots: Vec<ExtraRoot>,
     /// Duplicated player roots, in file order (drawn after their part's main root).
@@ -502,6 +505,7 @@ impl Model {
             texture_png,
             elytra_texture,
             cape_texture,
+            anim_textures: raw.anim_textures,
             extra_roots,
             dup_roots,
             keep_vanilla: raw.keep_vanilla,

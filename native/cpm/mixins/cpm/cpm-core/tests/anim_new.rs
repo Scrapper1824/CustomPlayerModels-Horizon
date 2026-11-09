@@ -222,6 +222,7 @@ fn model() -> Model {
         texture: None,
         elytra_texture: None,
         cape_texture: None,
+        anim_textures: Vec::new(),
         extra_roots: Vec::new(),
         dup_roots: Vec::new(),
         part_pos: Vec::new(),

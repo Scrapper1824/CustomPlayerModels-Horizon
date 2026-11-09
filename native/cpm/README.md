@@ -21,7 +21,7 @@ or use the launcher window's **Build** button described below.
 
 **As an installed mod (kept with the instance's other native mods):**
 
-1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.1.3.hnmod`.
+1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.1.4.hnmod`.
 2. Copy it to `%APPDATA%\horizon\horizon-native-mods\cpm.hnmod`. Create the folder if it is missing.
 3. Turn it on: add the line `mod.cpm:true` to `%APPDATA%\horizon\horizon-mods.txt`. Create the file if it is
    missing. The launcher builds only the native mods that are turned on there.
@@ -54,6 +54,11 @@ Options → Mods.
 If a model cannot be drawn, the settings page shows an `Error:` line (also in the log, `cpm: <file>: ...`). A
 model needs its own embedded texture (no skin fallback yet), and the texture must be at most 1020x1024 (with
 the model's elytra and cape textures, if it has them, beside it: their widths plus 4 at most 1024).
+
+A model's animated textures (regions of its skin, cape or elytra texture that step through frames, or blend from
+one frame into the next) play as in CPM, in the world and in the gesture menu's and picker's previews. The texture
+is sent to the game again only when a frame changes its pixels (a blending one every 50 ms, so
+it blends in 20 steps a second rather than every frame).
 
 ### Gesture menu
 
@@ -111,8 +116,16 @@ The game leaves out its own armor and elytra for a player a mod draws, so the mo
   texture if it has one, else the elytra's (a CIT elytra texture, or your cape's elytra as the game draws it).
 - Only vanilla armor (`minecraft:<material>_helmet` and so on) is drawn as armor: a modded armor item shows
   nothing on the model, and does not count as worn. A pumpkin, head or other item in the head slot is a head
-  item (below). The enchantment glint, emissive
-  (OptiFine `_e`) armor textures and armor in first person are not drawn.
+  item (below). Armor in first person is not drawn.
+- Enchanted armor glints as the game draws it: on the piece's first texture and its trim (not leather's
+  overlay), on the model's textured armor parts and the vanilla pieces alike (colour and glowing cubes do not
+  glint, as in CPM). An enchanted elytra's textured wings glint whatever texture they take (the model's elytra
+  texture, a CIT one, your cape's).
+- Custom armor means resource packs that retexture vanilla armor and OptiFine CIT armor: the equipment asset of a
+  non-vanilla item (a server's `equippable` `asset_id`) is not read.
+- A texture with an OptiFine emissive overlay (`_e`, or the pack's own suffix) is drawn again with it at full
+  brightness, without the glint: each armor texture's, and the elytra's (not over the model's elytra texture or
+  your cape).
 
 ### Capes
 
@@ -207,12 +220,13 @@ ends. (If the page still says **Converting…**, press any of its buttons or reo
 - `<name>.cpmmodel` is written to `player_models`, named after the project. If a model of that name is already
   there and was not made by the converter, it is kept and the new one is `<name>_2.cpmmodel` (then `_3`, ...).
   An earlier conversion of the same project is overwritten. The converter marks its models by ending their
-  description with ` (converted by CPM for Horizon, v3)` (the converter's version). If that model is the one
-  you are drawn with, it is loaded again. A model made by an older converter (it lacked the armour parts, or
-  the render scale and first-person hand) still draws, but the page says `Old conversion: convert <name>.cpmproject again` and the log has a line for it.
+  description with ` (converted by CPM for Horizon, v4)` (the converter's version). If that model is the one
+  you are drawn with, it is loaded again. A model made by an older converter (it lacked the armour parts,
+  the render scale and first-person hand, or animated textures) still draws, but the page says `Old conversion: convert <name>.cpmproject again` and the log has a line for it.
 - Converted models use CPM's current format (`CUBES`, `ROOT_INFO`, `ANIMATION_NEW`), so other players need a
   recent CPM to see them.
-- The render scale, the first-person hand, cape parts and the cape texture are carried over.
+- The render scale, the first-person hand, cape parts, the cape texture and animated textures (of the skin, cape and
+  elytra textures) are carried over.
 - What the converter cannot carry over (extra textures, templates, gameplay scaling, tags, ...) is skipped: the page says
   `(N skipped, see log)` and the log has one `cpm: convert <file>: <what>` line for each.
 - On an error nothing is written, and the page shows `Convert error: ...`. The converted model is loaded back
@@ -263,7 +277,7 @@ in-game test model) and an unknown loader are errors (`unsupported link`).
 
 ## Not supported (yet)
 
-Other players' models, modded armor, the enchantment glint, animated textures, and items and parrots in the
+Other players' models, modded armor, the enchantment glint in the preview, and items and parrots in the
 preview. Duplicated root parts (a second head, arm and so on) are drawn as
 CPM draws them: they follow their body part's pose with their own offset, draw that part's skin box and second
 layer unless hidden, take their animations and draw their cubes. Extruded parts are drawn as CPM draws them (the texture
@@ -284,7 +298,7 @@ sliced per texel, so its transparent texels leave holes).
 (cd native/cpm/mixins/cpm/cpm-core && cargo test)   # the reader and engine
 python native/tools/native.py check cpm        # apply on the tested Horizon and cargo check the game
                                                # (with the generated game executable the [api] package needs)
-python native/tools/native.py package cpm      # native/target/cpm-0.1.3.hnmod
+python native/tools/native.py package cpm      # native/target/cpm-0.1.4.hnmod
 ```
 
 `cargo test` inside `cpm-core` leaves a `Cargo.lock` and a `target/` there. Delete both before `check`:

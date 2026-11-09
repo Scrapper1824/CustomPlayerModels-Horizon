@@ -94,6 +94,7 @@ fn project(roots: Vec<ProjectRoot>, skin_png: Vec<u8>) -> Project {
         elytra_size: [64, 32],
         cape_png: None,
         cape_size: [64, 32],
+        anim_textures: Vec::new(),
         hide_head_if_skull: true,
         remove_armor_offset: false,
         remove_bed_offset: false,
@@ -640,4 +641,27 @@ fn mirrored_extreme_texture_size_wraps() {
     let raw = read_cpmmodel(&bytes).unwrap().data;
     let tex: Vec<i8> = raw.cubes.iter().filter(|c| c.id >= 10).map(|c| c.tex_size as i8).collect();
     assert_eq!(tex, [0, -3]);
+}
+
+#[test]
+fn animated_textures_exported_after_their_sheet() {
+    use cpm_core::anim::texture::AnimTex;
+    let t = AnimTex {
+        sheet: 0,
+        uv_start: [1, 2],
+        uv_size: [3, 4],
+        anim_start: [5, 600],
+        frame_count: 4,
+        frame_time: 120,
+        an_x: true,
+        interpolate: false,
+    };
+    let c = AnimTex { sheet: 2, an_x: false, interpolate: true, ..t };
+    let mut p = project(six_roots(), png(64, 64));
+    p.cape_png = Some(png(64, 32));
+    p.anim_textures = vec![c, t];
+    let bytes = export_model(&p).unwrap();
+    let f = read_cpmmodel(&bytes).unwrap();
+    // Per sheet in the exporter's order (skin, then cape), each after its TEXTURE.
+    assert_eq!(f.data.anim_textures, vec![t, c]);
 }

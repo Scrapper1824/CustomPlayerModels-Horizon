@@ -5,8 +5,9 @@
 //! per-element `RENDER_EFFECT`s, copy-transform effects, `ANIMATION_NEW` ([`anim`]), `TEXTURE`,
 //! render scale (`SCALING` + `MODEL_SCALE`), project effects (hide skull, armor offset, bed
 //! offset, invisible glow), first-person hand, copy protection, `END`.
-//! Parts whose data the [`Project`] does not carry (templates, gameplay scaling, tags, animated
-//! textures, extra texture sheets) are not written; the project reader warns about them.
+//! Each sheet's `TEXTURE` is followed by its `ANIMATED_TEX` parts.
+//! Parts whose data the [`Project`] does not carry (templates, gameplay scaling, tags, extra
+//! texture sheets) are not written; the project reader warns about them.
 //!
 //! Images are written as the project stores them (Java re-encodes them through `ImageIO`), so PNG
 //! bytes may differ from the editor's while decoding to the same pixels.
@@ -27,6 +28,7 @@ mod part {
     pub const SKIN_TYPE: u8 = 11;
     pub const CLONEABLE: u8 = 15;
     pub const TEXTURE: u8 = 17;
+    pub const ANIMATED_TEX: u8 = 18;
     pub const CUBES: u8 = 21;
     pub const ROOT_INFO: u8 = 22;
 }
@@ -101,6 +103,20 @@ pub fn export_model(project: &Project) -> Result<Vec<u8>> {
         }
     }
     Ok(checksummed(HEADER, &w.into_bytes()))
+}
+
+/// `ModelPartAnimatedTexture.write` for each of `sheet`'s animated textures (ExporterImpl.java:95-96).
+fn write_anim_textures(w: &mut Writer, project: &Project, sheet: u8) {
+    for a in project.anim_textures.iter().filter(|a| a.sheet == sheet) {
+        let mut t = Writer::new();
+        t.u8(a.sheet);
+        for v in [a.uv_start, a.uv_size, a.anim_start] {
+            t.varint(v[0] as u32).varint(v[1] as u32);
+        }
+        t.varint(a.frame_count as u32).varint(a.frame_time as u32);
+        t.u8(a.an_x as u8 | (a.interpolate as u8) << 1);
+        w.object_block(part::ANIMATED_TEX, &t);
+    }
 }
 
 /// The model data block: `0x53`, the parts, `END`, checksum (`exportSkin0`).
@@ -222,6 +238,7 @@ fn export_definition(project: &Project) -> Result<Vec<u8>> {
     t.u8(0).i16(size[0] as u16 as i16).i16(size[1] as u16 as i16);
     t.varint(project.skin_png.len() as u32).bytes(&project.skin_png);
     w.object_block(part::TEXTURE, &t);
+    write_anim_textures(&mut w, project, 0);
     // The CAPE and ELYTRA sheets, when the project has its own (ExporterImpl.java:92-98 writes
     // every editable sheet; Java's map order is unspecified, SKIN first here, then by ordinal).
     for (sheet, png, size) in [
@@ -233,6 +250,7 @@ fn export_definition(project: &Project) -> Result<Vec<u8>> {
         t.u8(sheet).i16(size[0] as u16 as i16).i16(size[1] as u16 as i16);
         t.varint(png.len() as u32).bytes(png);
         w.object_block(part::TEXTURE, &t);
+        write_anim_textures(&mut w, project, sheet);
     }
 
     // Render scale (ExporterImpl.java:102-106): SCALING makes the ScaleData MODEL_SCALE sets.

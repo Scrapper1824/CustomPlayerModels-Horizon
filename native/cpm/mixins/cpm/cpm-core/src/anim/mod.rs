@@ -7,6 +7,7 @@ pub mod legacy;
 pub mod new;
 pub mod engine;
 pub mod buttons;
+pub mod texture;
 
 pub use legacy::decode_legacy;
 pub use new::decode_new;

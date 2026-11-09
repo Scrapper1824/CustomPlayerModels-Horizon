@@ -1,5 +1,6 @@
 //! `.cpmmodel` container and legacy (pre-V2) model definition decoding.
 
+use crate::anim::texture::AnimTex;
 use crate::io::{CpmError, Reader, Result};
 
 /// First byte of both the container and the model data.
@@ -18,6 +19,7 @@ mod part {
     pub const PLAYER: u8 = 1;
     pub const SCALE: u8 = 16;
     pub const TEXTURE: u8 = 17;
+    pub const ANIMATED_TEX: u8 = 18;
     pub const CUBES: u8 = 21;
     pub const PACKAGE_LINK: u8 = 20;
     pub const MODEL_ROOT: u8 = 12;
@@ -112,6 +114,8 @@ pub struct RawModel {
     pub elytra_texture: Option<RawTexture>,
     /// `TEXTURE` of sheet type `CAPE`.
     pub cape_texture: Option<RawTexture>,
+    /// `ANIMATED_TEX` parts, in file order (every sheet; only the drawn ones are applied).
+    pub anim_textures: Vec<AnimTex>,
     /// Non-player roots (`ROOT_INFO` with `ROOT_MODEL | ROOT_CREATE`), in file order.
     pub extra_roots: Vec<RawRoot>,
     /// Duplicated player roots, in file order.
@@ -235,6 +239,7 @@ fn read_definition_with(data: &[u8], ctx: Ctx) -> Result<RawModel> {
         texture: None,
         elytra_texture: None,
         cape_texture: None,
+        anim_textures: Vec::new(),
         extra_roots: Vec::new(),
         dup_roots: Vec::new(),
         part_pos: Vec::new(),
@@ -330,6 +335,26 @@ fn read_parts(r: &mut Reader, m: &mut RawModel, depth: u32, ctx: Ctx) -> Result<
                         _ => m.elytra_texture = tex,
                     }
                 }
+            }
+            part::ANIMATED_TEX => {
+                // ModelPartAnimatedTexture: sheet (enum byte), uvStart, uvSize, animStart
+                // (`read2v`: two varints each), frameCount, frameTime (varints), flags.
+                let sheet = b.u8()?;
+                let mut v2 = || -> Result<[i32; 2]> { Ok([b.varint()? as i32, b.varint()? as i32]) };
+                let (uv_start, uv_size, anim_start) = (v2()?, v2()?, v2()?);
+                let frame_count = b.varint()? as i32;
+                let frame_time = b.varint()? as i32;
+                let flags = b.u8()?;
+                m.anim_textures.push(AnimTex {
+                    sheet,
+                    uv_start,
+                    uv_size,
+                    anim_start,
+                    frame_count,
+                    frame_time,
+                    an_x: flags & 1 != 0,
+                    interpolate: flags & 2 != 0,
+                });
             }
             part::ROOT_INFO => {
                 let flags = b.u8()?;

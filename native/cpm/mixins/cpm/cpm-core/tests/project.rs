@@ -298,3 +298,55 @@ fn tags_are_warned_about() {
     let tags: Vec<&String> = p.warnings.iter().filter(|w| w.contains("tags")).collect();
     assert_eq!(tags, ["items tags are not converted"]);
 }
+
+#[test]
+fn animated_textures_read() {
+    // TexturesLoaderV1.loadAnimatedTexture / AnimatedTex(JsonMap): per drawn sheet whose image
+    // loaded; a missing value is 0 / false.
+    let config = br#"{"version": 1, "textures": {
+        "skin": {"anim": [
+            {"frameTime": 120, "frameCount": 4, "start": {"x": 1, "y": 2}, "size": {"x": 3, "y": 4},
+             "from": {"x": 5, "y": 6}, "anX": true, "interpolate": true},
+            {"frameTime": 50}
+        ]},
+        "cape": {"anim": [{"frameTime": 10, "frameCount": 2, "size": {"x": 1, "y": 1}}]},
+        "elytra": {"anim": [{"frameTime": 10, "frameCount": 2}]},
+        "list_icon": {"anim": [{"frameTime": 10, "frameCount": 2}]}
+    }}"#;
+    let skin = png(64, 64);
+    let cape = png(64, 32);
+    let icon = png(8, 8);
+    let zip = make_zip(&[("config.json", config), ("skin.png", &skin), ("cape.png", &cape), ("list_icon.png", &icon)]);
+    let p = read_project(&zip).unwrap();
+    use cpm_core::anim::texture::AnimTex;
+    let z = AnimTex {
+        sheet: 0,
+        uv_start: [0, 0],
+        uv_size: [0, 0],
+        anim_start: [0, 0],
+        frame_count: 0,
+        frame_time: 0,
+        an_x: false,
+        interpolate: false,
+    };
+    assert_eq!(
+        p.anim_textures,
+        vec![
+            AnimTex {
+                uv_start: [1, 2],
+                uv_size: [3, 4],
+                anim_start: [5, 6],
+                frame_count: 4,
+                frame_time: 120,
+                an_x: true,
+                interpolate: true,
+                ..z
+            },
+            AnimTex { frame_time: 50, ..z },
+            AnimTex { sheet: 2, frame_time: 10, frame_count: 2, uv_size: [1, 1], ..z },
+        ]
+    );
+    // No elytra.png: its animation has no sheet (Java loads none). The list icon is not converted.
+    let anim: Vec<&String> = p.warnings.iter().filter(|w| w.contains("animated")).collect();
+    assert_eq!(anim, ["animated list_icon textures are not converted"]);
+}
