@@ -15,7 +15,8 @@ fn cpm_page(game: &mut crate::game::Game<'_>, mod_id: &str, buttons: &mut Vec<St
     cpm::ensure_loaded();
     // A conversion that just ended shows here even when the frame hook is not running.
     let _ = cpm::poll_convert();
-    let (selected, error, last) = (cpm::selected(), cpm::last_error(), cpm::last_convert());
+    // What draws: the skin's model too when nothing is chosen (its own line says so).
+    let (selected, error, last) = (cpm::active_selection(), cpm::last_error(), cpm::last_convert());
     let convert = cpm::ConvertView {
         busy: cpm::convert_busy(),
         last: last.as_ref(),

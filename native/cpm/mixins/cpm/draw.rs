@@ -1,5 +1,6 @@
-// The model's quads drawn with the game's `native_draw_quad`: what player_submit.rs and
-// first_person_arm.rs share. Added to the game as `game::cpm_draw`.
+// The model's quads drawn with the game's `native_draw_quad` (what player_submit.rs and
+// first_person_arm.rs share), and as a player head's item quads (skull_hook.rs). Added to the game
+// as `game::cpm_draw`.
 
 /// Draws `quads` into `draw`, each with its sprite: a glowing or emissive one at full brightness,
 /// the others at `draw.light` (left as it was). False, with nothing drawn, when the atlas lacks the
@@ -150,4 +151,59 @@ fn glow_pass(
         }
     }
     *draw = BlockEntityDraw::posed(partial, game_time, light, block, pose, lights, verts);
+}
+
+/// A player head as the model's head (`RedirectHolderSkull`), when the head is the local player's
+/// (`cpm_head_probe`): the item renderer's drawing (skull_hook.rs, set by frame.rs), given the
+/// head's `profile`, the skull `head` part's matrix `head` and the atlas `sprites`. Each quad goes
+/// to `sink` as the vanilla skull's faces do (`PlayerHeadSpecialRenderer`: the skin's
+/// `entityTranslucent`, so improved transparency's stages), shaded and lit by the sink (the
+/// wearer's light in the world, the GUI's in a slot); a glowing or emissive face at full block
+/// light (the light emission a quad can carry; CPM's eyes layer has no item-renderer pass). False,
+/// with nothing drawn (the vanilla skull), for another player's head, with no model or its
+/// texture not in the game yet, or when the atlas lacks the model's sprite.
+pub(crate) fn player_head(
+    profile: &serde_json::Value,
+    head: glam::Mat4,
+    sprites: &std::collections::HashMap<String, horizon_client::hud::Rect>,
+    sink: &mut dyn horizon_client::item_render::ItemSink,
+) -> bool {
+    use crate::game::cpm_mod as cpm;
+    use glam::Vec3;
+    use horizon_client::item_render::{Foil, ItemQuad};
+    if !cpm::is_own_head(&crate::game::cpm_head_probe::profile(profile)) {
+        return false;
+    }
+    let Some(quads) = cpm::skull_quads(cpm::clock_ms(std::time::Instant::now())) else {
+        return false;
+    };
+    if !sprites.contains_key(cpm::SPRITE) {
+        return false;
+    }
+    // A reflection reverses the winding, not the normals (special.rs `draw`).
+    let flip = head.determinant() < 0.0;
+    for q in &quads.quads {
+        let name = quads.sprites.get(q.sprite).map_or(cpm::SPRITE, String::as_str);
+        let Some(r) = sprites.get(name) else { continue };
+        let pos = q.corners.map(|c| head.transform_point3(Vec3::from_array(c)));
+        let normal = (pos[1] - pos[0]).cross(pos[2] - pos[0]).normalize_or_zero();
+        let normal = if normal == Vec3::ZERO { (pos[2] - pos[1]).cross(pos[3] - pos[1]).normalize_or(Vec3::Y) } else { normal };
+        let normal = if flip { -normal } else { normal };
+        // native_draw_quad's mapping: texels of 16 a side, corners TL, BL, BR, TR.
+        let [u0, v0, u1, v1] = q.uv.map(|t| t / 16.0);
+        let local = [[u0, v0], [u0, v1], [u1, v1], [u1, v0]];
+        sink.quad(ItemQuad {
+            pos,
+            uv: local.map(|[u, v]| [r.u0 + (r.u1 - r.u0) * u, r.v0 + (r.v1 - r.v0) * v]),
+            foil_uv: local,
+            normal,
+            color: 0xFF00_0000 | (q.tint & 0xFF_FFFF),
+            foil: Foil::None,
+            light_emission: if q.glow || q.emissive { 15 } else { 0 },
+            cull_back: false,
+            translucent: false,
+            oit: true,
+        });
+    }
+    true
 }

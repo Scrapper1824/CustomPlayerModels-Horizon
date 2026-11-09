@@ -8,6 +8,7 @@ pub mod anim;
 pub mod mesh;
 pub mod project;
 pub mod export;
+pub mod skin;
 
 pub use anim::engine::{CapeState, Engine, Equipment, Frame, Hand, PartDelta, PoseInput, UseKind, FALL_DISTANCE};
 pub use io::{CpmError, Result};

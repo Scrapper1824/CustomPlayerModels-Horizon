@@ -11,8 +11,9 @@ fn cpm_click(game: &mut crate::game::Game<'_>, mod_id: &str, button: usize) {
     let dir = cpm::models_dir(&data);
     cpm::restore_once(|| cpm::selection_from_setting(&dir, game.native_setting(cpm::ID, cpm::MODEL_SETTING)));
     let limit = cpm::gist_limit(game.native_setting(cpm::ID, cpm::GIST_LIMIT_SETTING));
-    // Read from disk at each click, so files added since show up.
-    match cpm::click(button, &cpm::list_models(&dir), cpm::selected().as_deref()) {
+    // Read from disk at each click, so files added since show up; the skin's model first while
+    // the skin holds one, and the cycle goes on from what draws.
+    match cpm::click(button, &cpm::model_cycle(cpm::list_models(&dir)), cpm::active_selection().as_deref()) {
         cpm::Click::Select(next) => {
             game.native_set_setting(cpm::ID, cpm::MODEL_SETTING, &cpm::model_setting(next.as_deref()));
             cpm::select(next);

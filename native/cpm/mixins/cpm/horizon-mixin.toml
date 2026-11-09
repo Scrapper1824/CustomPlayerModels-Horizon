@@ -1,11 +1,12 @@
 [mod]
 id = "cpm"
-version = "0.1.4"
+version = "0.1.5"
 priority = 100
 
 # The commit it was tested on. It uses the native hook points (hooks 355 in compatibility.json)
-# and one function of the game's own, `Game::first_person_arm` (injection `first_person_arm`,
-# a raw target no hook catalog keeps stable): a Horizon that renamed or changed it fails to build.
+# and two functions of the game's own, `Game::first_person_arm` (injection `first_person_arm`) and
+# `item_render::special::submit` (injection `player_head`), raw targets no hook catalog keeps
+# stable: a Horizon that renamed or changed them fails to build.
 [compatibility]
 horizon_revision = "02c8607ee8ebd216f2f535c1eb7b62b572830df2"
 
@@ -75,7 +76,45 @@ bindings = [
   { name = "out", ty = "&mut Vec<horizon_client::mesher::Vertex>", value = "&mut *out" },
 ]
 
-# The quad drawing player_submit and first_person_arm share (no hook of its own).
+# A player head (held, in a slot, dropped, framed, or worn by the player, a mob or an armour stand:
+# all draw through `PlayerHeadSpecialRenderer`, item_render/special.rs `submit`) shows the model's
+# head when it is the player's own. Not a named hook point but the game's own function, in the
+# client library, so it holds for the pinned commit only; cancelled (the vanilla skull skipped) only
+# when the model's head was drawn. The library cannot reach the mod's code in the game crate, so it
+# calls the drawing the game crate hands it (`cpm_skull_hook`, below).
+[[injection]]
+id = "player_head"
+target = "horizon_client_lib::item_render::special::submit"
+kind = "HEAD"
+cancellable = true
+helper = "player_head.rs"
+bindings = [
+  { name = "renderer", ty = "&ItemRenderer", value = "renderer" },
+  { name = "model", ty = "&SpecialModel", value = "model" },
+  { name = "argument", ty = "&Value", value = "argument" },
+  { name = "pose", ty = "Mat4", value = "pose" },
+  { name = "sprites", ty = "&HashMap<String, Rect>", value = "sprites" },
+  { name = "sink", ty = "&mut dyn ItemSink", value = "&mut *sink" },
+]
+
+# Where the game crate hands the item renderer its player-head drawing (draw.rs `player_head`, set
+# by the frame hook): public, for the game crate (no hook of its own).
+[[module]]
+id = "skull_hook"
+file = "crates/horizon-client/src/item_render.rs"
+name = "cpm_skull_hook"
+source = "skull_hook.rs"
+visibility = "pub"
+
+# Whose a player head is: the player's identities and a head's profile, which the frame hook and
+# draw.rs use (no hook of its own).
+[[module]]
+id = "head_probe"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_head_probe"
+source = "head_probe.rs"
+
+# The quad drawing player_submit, first_person_arm and the player heads share (no hook of its own).
 [[module]]
 id = "draw"
 file = "crates/horizon-client/src/game.rs"
@@ -120,6 +159,14 @@ id = "cape_probe"
 file = "crates/horizon-client/src/game.rs"
 name = "cpm_cape_probe"
 source = "cape_probe.rs"
+
+# The local player's downloaded skin (the raw PNG in the game's skin cache, for the model stored in
+# it, and the skin as drawn), which the frame hook hands to runtime.rs (no hook of its own).
+[[module]]
+id = "skin_probe"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_skin_probe"
+source = "skin_probe.rs"
 
 # What the local player wears (armour, trims, elytra) and the atlas textures for it, which
 # player_submit uses (no hook of its own).

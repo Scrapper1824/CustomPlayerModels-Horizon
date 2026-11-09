@@ -16,6 +16,10 @@ fn cpm_frame(game: &mut crate::game::Game<'_>) {
     // The gesture menu (the menu key or `Gestures…`): open its screen when asked for and the game
     // lets it, drop it once closed (or the mod is off).
     crate::game::cpm_menu::frame(game);
+    // Player heads: the item renderer's drawing of the player's own (once), and who the player is
+    // (no one while the mod is off: every head is then vanilla).
+    horizon_client::item_render::cpm_skull_hook::set(crate::game::cpm_draw::player_head);
+    crate::game::cpm_head_probe::update(game);
     if !game.native_on(cpm::ID) {
         return;
     }
@@ -26,6 +30,8 @@ fn cpm_frame(game: &mut crate::game::Game<'_>) {
         let dir = cpm::models_dir(&data);
         cpm::selection_from_setting(&dir, game.native_setting(cpm::ID, cpm::MODEL_SETTING))
     });
+    // The skin's model (drawn when nothing is chosen): read again when the skin changes.
+    crate::game::cpm_skin_probe::update(game);
     cpm::ensure_loaded();
     // A model that just loaded gets its kept parameters; later changes are kept as they happen.
     cpm::restore_params(|key| game.native_setting(cpm::ID, key));

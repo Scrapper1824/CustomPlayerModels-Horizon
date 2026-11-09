@@ -67,6 +67,8 @@ struct State {
     desc: Option<String>,
     /// The loaded model was converted by an older converter ([`old_conversion`]).
     old_conversion: bool,
+    /// The local player's identities ([`set_own_identities`]), which player heads are matched to.
+    own: Vec<Identity>,
     /// The input the world draw last posed the model with ([`record_input`]).
     last_input: Option<PoseInput>,
     /// The loaded model's preview fit: the first frame its preview drew ([`preview_fit`]), kept for the load.
@@ -79,6 +81,127 @@ struct State {
     upload_due: bool,
     /// When the image was last sent.
     last_upload: Option<Instant>,
+    /// The local player's downloaded skin and the model stored in it ([`set_skin`]).
+    skin: Option<SkinState>,
+    /// The skin `model` (or `error`) is for, when it is the skin's model ([`is_skin`]).
+    loaded_skin: Option<String>,
+}
+
+/// The `model` setting's value for the model stored in the player's skin ([`skin_selection`]).
+/// Not a `.cpmmodel` name, so never a file of the folder.
+pub const SKIN_SETTING: &str = "<skin>";
+/// The skin's model on the Model button and its picker tile.
+pub const SKIN_MODEL: &str = "Your skin's model";
+/// The settings page's line while the skin's model is the one drawn (chosen, or nothing chosen).
+pub const SKIN_IN_USE: &str = "Using the model stored in your skin";
+/// The skin's model in error lines (`cpm: skin model: <error>`).
+const SKIN_NAME: &str = "skin model";
+
+/// The local player's skin, from the game's skin cache (skin_probe.rs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkinInput {
+    /// Its texture id (`skins/<digest>`): a new one is a new skin.
+    pub location: String,
+    /// `PlayerSkin.model` is slim: the slim channel is read first.
+    pub slim: bool,
+    /// The raw downloaded PNG (the data lives in it; the game's processed copy loses it).
+    pub png: Vec<u8>,
+    /// The skin as the game draws it (size, RGBA8): the texture of a skin model without its own.
+    pub texture: Option<([u32; 2], Vec<u8>)>,
+}
+
+struct SkinState {
+    location: String,
+    slim: bool,
+    texture: Option<([u32; 2], Vec<u8>)>,
+    /// The model in the skin as a `.cpmmodel`, or why its data does not read; `None`: no model.
+    model: Option<Result<Vec<u8>, String>>,
+}
+
+/// The selection that stands for the skin's model ([`SKIN_SETTING`]).
+pub fn skin_selection() -> PathBuf {
+    PathBuf::from(SKIN_SETTING)
+}
+
+/// Whether `path` is [`skin_selection`].
+pub fn is_skin(path: &Path) -> bool {
+    path == Path::new(SKIN_SETTING)
+}
+
+/// The local player's skin changed (`None`: no downloaded skin, as a default or offline one):
+/// reads the model stored in it (`ModelDefinitionLoader.loadModel(Image, Player)`, the slim or
+/// wide channel per `slim`). A PNG that does not decode holds no model (logged).
+pub fn set_skin(skin: Option<SkinInput>) {
+    let state = skin.map(|k| {
+        let ty = if k.slim { cpm_core::format::SkinType::Slim } else { cpm_core::format::SkinType::Default };
+        let model = match cpm_core::skin::Image::decode(&k.png) {
+            Ok(img) => match cpm_core::skin::read_skin_data(&img, ty) {
+                Ok(Some(data)) => Some(Ok(cpm_core::skin::container(&data))),
+                Ok(None) => None,
+                Err(e) => Some(Err(e.to_string())),
+            },
+            Err(e) => {
+                // (An empty one: the file did not read, as the probe logged.)
+                if !k.png.is_empty() {
+                    log::warn!("cpm: cannot read your skin {}: {e}", k.location);
+                }
+                None
+            }
+        };
+        SkinState { location: k.location, slim: k.slim, texture: k.texture, model }
+    });
+    // A picker open on the old skin keeps its tiles until it opens again.
+    STATE.with_borrow_mut(|s| s.skin = state);
+}
+
+/// Whether `location` (slim or not) is the skin [`set_skin`] last read: the probe reads the file
+/// again only for a new one.
+pub fn skin_known(location: &str, slim: bool) -> bool {
+    STATE.with_borrow(|s| s.skin.as_ref().is_some_and(|k| k.location == location && k.slim == slim))
+}
+
+/// Whether a skin was given ([`set_skin`]); the probe clears it only then.
+pub fn skin_set() -> bool {
+    STATE.with_borrow(|s| s.skin.is_some())
+}
+
+fn skin_has_model(s: &State) -> bool {
+    s.skin.as_ref().is_some_and(|k| k.model.is_some())
+}
+
+/// What draws: the chosen file; the skin's model when it is chosen or nothing is (CPM's "skin
+/// model" when no model is set), while the skin holds one; else nothing (the vanilla player).
+fn effective(s: &State) -> Option<PathBuf> {
+    match &s.selected {
+        Some(p) if !is_skin(p) => Some(p.clone()),
+        _ => skin_has_model(s).then(skin_selection),
+    }
+}
+
+/// The selection that draws ([`effective`]): what the Model button shows and cycles from.
+pub fn active_selection() -> Option<PathBuf> {
+    STATE.with_borrow(effective)
+}
+
+/// Whether the skin's model is the one drawn (chosen, or nothing chosen). Only the tests ask (the
+/// settings page reads it from [`active_selection`]).
+#[allow(dead_code)]
+pub fn skin_model_in_use() -> bool {
+    STATE.with_borrow(|s| effective(s).is_some_and(|p| is_skin(&p)))
+}
+
+/// The Model button's cycle: the skin's model first while the skin holds one, then `models`.
+pub fn model_cycle(models: Vec<PathBuf>) -> Vec<PathBuf> {
+    let skin = STATE.with_borrow(skin_has_model);
+    skin.then(skin_selection).into_iter().chain(models).collect()
+}
+
+/// A selection's name in messages: the file's name, [`SKIN_NAME`] for the skin's model.
+fn shown_name(path: Option<&Path>) -> String {
+    match path {
+        Some(p) if is_skin(p) => SKIN_NAME.to_owned(),
+        _ => file_name(path),
+    }
 }
 
 thread_local! {
@@ -90,7 +213,8 @@ pub fn select(path: Option<PathBuf>) {
     STATE.with_borrow_mut(|s| s.selected = path);
 }
 
-/// The model file chosen.
+/// The model file chosen. Only the tests ask (the game shows and cycles [`active_selection`]).
+#[allow(dead_code)]
 pub fn selected() -> Option<PathBuf> {
     STATE.with_borrow(|s| s.selected.clone())
 }
@@ -106,11 +230,15 @@ pub fn selected() -> Option<PathBuf> {
 /// other loaders), tried again when the model is selected again.
 pub fn ensure_loaded() {
     STATE.with_borrow_mut(|s| {
-        if s.selected == s.loaded {
+        let want = effective(s);
+        // The skin's model loads again for a new skin.
+        let want_skin = want.as_deref().filter(|p| is_skin(p)).and_then(|_| s.skin.as_ref()).map(|k| k.location.clone());
+        if want == s.loaded && want_skin == s.loaded_skin {
             poll_link(s);
             return;
         }
-        s.loaded = s.selected.clone();
+        s.loaded = want.clone();
+        s.loaded_skin = want_skin;
         s.model = None;
         s.error = None;
         s.uploaded = None;
@@ -122,11 +250,20 @@ pub fn ensure_loaded() {
         s.desc = None;
         s.old_conversion = false;
         s.preview_fit = None;
-        let Some(path) = s.selected.clone() else { return };
-        let name = file_name(Some(&path));
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) => return fail(s, format!("cpm: {name}: {e}")),
+        let Some(path) = want else { return };
+        let name = shown_name(Some(&path));
+        let bytes = if is_skin(&path) {
+            // The skin's model, as a `.cpmmodel` (links resolve as any model's).
+            match s.skin.as_ref().and_then(|k| k.model.clone()) {
+                Some(Ok(bytes)) => bytes,
+                Some(Err(e)) => return fail(s, format!("cpm: {name}: {e}")),
+                None => return,
+            }
+        } else {
+            match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) => return fail(s, format!("cpm: {name}: {e}")),
+            }
         };
         s.desc = cpm_core::format::read_cpmmodel(&bytes).ok().map(|f| f.desc);
         match cpm_core::load(&bytes) {
@@ -138,7 +275,13 @@ pub fn ensure_loaded() {
 }
 
 /// Keeps `model` when it has a texture ([`check_texture`]).
-fn accept(s: &mut State, name: &str, model: LoadedModel) {
+fn accept(s: &mut State, name: &str, mut model: LoadedModel) {
+    // The skin's model without a texture of its own draws with the skin (`ModelDefinition`).
+    if s.loaded.as_deref().is_some_and(is_skin)
+        && let Some((size, rgba)) = s.skin.as_ref().and_then(|k| k.texture.clone())
+    {
+        cpm_core::skin::use_skin_texture(&mut model, size, rgba);
+    }
     match check_texture(name, &model) {
         Ok(()) => {
             log::info!("cpm: loaded {name} ({})", model.name);
@@ -234,7 +377,7 @@ fn resolve(s: &mut State, name: &str, bytes: Vec<u8>, got: Vec<(String, Vec<u8>)
 fn poll_link(s: &mut State) {
     let Some(result) = s.waiting.as_ref().and_then(|w| take_fetch_result(&w.link)) else { return };
     let Some(Waiting { link, bytes, mut got }) = s.waiting.take() else { return };
-    let name = file_name(s.loaded.as_deref());
+    let name = shown_name(s.loaded.as_deref());
     match result {
         Ok(text) => {
             got.push((link, text));
@@ -381,7 +524,7 @@ pub fn has_model() -> bool {
 
 /// The selected file's name, for messages; "" when none.
 pub fn selected_name() -> String {
-    STATE.with_borrow(|s| file_name(s.selected.as_deref()))
+    STATE.with_borrow(|s| shown_name(effective(s).as_deref()))
 }
 
 fn file_name(path: Option<&Path>) -> String {
@@ -534,7 +677,7 @@ fn compose(s: &mut State) -> Option<Composed> {
         let layout = model_composite(model);
         let [w, h] = layout.size;
         if w > SPRITE_PX || h > SPRITE_PX {
-            let name = file_name(s.loaded.as_deref());
+            let name = shown_name(s.loaded.as_deref());
             let [pw, ph] = model.png_px;
             let sheet = |s: Option<&Sheet>, what: &str| {
                 s.map(|e| format!(" with a {}x{} {what} sheet", e.png_px[0], e.png_px[1])).unwrap_or_default()
@@ -1188,6 +1331,54 @@ pub fn arm_quads(left: bool) -> Option<Quads> {
     posed_quads(&Worn::default(), |m| Posed { boxes: m.pose_arm(left), items: Vec::new(), shoulders: Vec::new() })
 }
 
+/// The model's head as a player head shows it ([`LoadedModel::pose_skull`], the skull's poses at
+/// `time_ms`: [`clock_ms`]) as quads in the skull `head` part's frame (blocks, Y down); `None` as
+/// for [`quads`]. It wears nothing.
+pub fn skull_quads(time_ms: u64) -> Option<Quads> {
+    posed_quads(&Worn::default(), |m| Posed { boxes: m.pose_skull(time_ms), items: Vec::new(), shoulders: Vec::new() })
+}
+
+// ---- Player heads: whose they are. head_probe.rs reads the local player's identities from the
+// game and a head's profile from its `minecraft:profile`; the drawing asks here.
+
+/// One identity of the local player: a UUID (none when not known) and a name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Identity {
+    pub id: Option<u128>,
+    pub name: String,
+}
+
+/// What a player head's profile names (`ResolvableProfile`): its UUID and its name, each when
+/// given.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HeadProfile {
+    pub id: Option<u128>,
+    pub name: Option<String>,
+}
+
+/// True when `head` is one of `own` (`CustomPlayerModelsClient.manager.loadSkull` resolves the
+/// profile to a player, and only the local player has a model until multiplayer): by UUID when the
+/// head has one, else by name (Minecraft names compare without case). A head naming nothing
+/// matches nothing.
+pub fn profile_matches(head: &HeadProfile, own: &[Identity]) -> bool {
+    match (head.id, head.name.as_deref()) {
+        (Some(id), _) => own.iter().any(|o| o.id == Some(id)),
+        (None, Some(name)) => !name.is_empty() && own.iter().any(|o| o.name.eq_ignore_ascii_case(name)),
+        (None, None) => false,
+    }
+}
+
+/// Sets the local player's identities (none outside a world or while the mod is off: no head is
+/// then the player's).
+pub fn set_own_identities(own: Vec<Identity>) {
+    STATE.with_borrow_mut(|s| s.own = own);
+}
+
+/// True when `head` is the local player's ([`profile_matches`] against [`set_own_identities`]).
+pub fn is_own_head(head: &HeadProfile) -> bool {
+    STATE.with_borrow(|s| profile_matches(head, &s.own))
+}
+
 /// Milliseconds since the first call: the animation clock.
 pub fn clock_ms(now: Instant) -> u64 {
     STATE.with_borrow_mut(|s| {
@@ -1318,9 +1509,13 @@ pub fn list_models(dir: &Path) -> Vec<PathBuf> {
 pub const MODEL_SETTING: &str = "model";
 
 /// The stored `model` setting (a file name in `dir`) as a selection; `None` when unset, not a
-/// plain file name, or the file is gone (the vanilla player).
+/// plain file name, or the file is gone (the vanilla player). [`SKIN_SETTING`] is the skin's model
+/// ([`skin_selection`]), drawn while the skin holds one.
 pub fn selection_from_setting(dir: &Path, stored: Option<String>) -> Option<PathBuf> {
     let name = stored?;
+    if name == SKIN_SETTING {
+        return Some(skin_selection());
+    }
     let mut parts = Path::new(&name).components();
     let (Some(std::path::Component::Normal(_)), None) = (parts.next(), parts.next()) else {
         return None;
@@ -1329,9 +1524,13 @@ pub fn selection_from_setting(dir: &Path, stored: Option<String>) -> Option<Path
     path.is_file().then_some(path)
 }
 
-/// The value the `model` setting keeps for `selected`: its file name, "" for none.
+/// The value the `model` setting keeps for `selected`: its file name ([`SKIN_SETTING`] for the
+/// skin's model), "" for none.
 pub fn model_setting(selected: Option<&Path>) -> String {
-    file_name(selected)
+    match selected {
+        Some(p) if is_skin(p) => SKIN_SETTING.to_owned(),
+        _ => file_name(selected),
+    }
 }
 
 /// The id of the mod's one key (`NativeMod.keys`): it opens the gesture menu.
@@ -2127,13 +2326,27 @@ pub struct PreviewModel {
 /// Anything else that fails is [`CANT_READ`] (the reason logged).
 pub fn load_preview(path: &Path, data_dir: Option<&Path>) -> Result<PreviewModel, String> {
     let name = file_name(Some(path));
+    let bytes = std::fs::read(path).map_err(|e| {
+        log::warn!("cpm: preview {name}: {e}");
+        CANT_READ.to_owned()
+    })?;
+    preview_bytes(&name, &bytes, data_dir, None)
+}
+
+/// [`load_preview`] of the model file `bytes` (`name` in messages); a model without a texture of
+/// its own gets `skin` (the skin's model).
+fn preview_bytes(
+    name: &str,
+    bytes: &[u8],
+    data_dir: Option<&Path>,
+    skin: Option<([u32; 2], Vec<u8>)>,
+) -> Result<PreviewModel, String> {
     let cant = |e: &dyn std::fmt::Display| {
         log::warn!("cpm: preview {name}: {e}");
         CANT_READ.to_owned()
     };
-    let bytes = std::fs::read(path).map_err(|e| cant(&e))?;
-    let desc = cpm_core::format::read_cpmmodel(&bytes).map_err(|e| cant(&e))?.desc;
-    let model = match cpm_core::load(&bytes) {
+    let desc = cpm_core::format::read_cpmmodel(bytes).map_err(|e| cant(&e))?.desc;
+    let mut model = match cpm_core::load(bytes) {
         Ok(model) => model,
         Err(cpm_core::CpmError::NeedsLink(_)) => {
             let read = |link: &str| {
@@ -2141,7 +2354,7 @@ pub fn load_preview(path: &Path, data_dir: Option<&Path>) -> Result<PreviewModel
                 let Some(cache) = cache else { return Err(cpm_core::CpmError::NeedsLink(link.to_owned())) };
                 std::fs::read(&cache).map_err(|e| cpm_core::CpmError::Invalid(format!("cannot read the cache: {e}")))
             };
-            match cpm_core::link::load_with_links(&bytes, &read) {
+            match cpm_core::link::load_with_links(bytes, &read) {
                 Ok(model) => model,
                 Err(cpm_core::CpmError::NeedsLink(_)) => return Err(NOT_CACHED.to_owned()),
                 Err(e) => return Err(cant(&e)),
@@ -2149,12 +2362,16 @@ pub fn load_preview(path: &Path, data_dir: Option<&Path>) -> Result<PreviewModel
         }
         Err(e) => return Err(cant(&e)),
     };
-    check_texture(&name, &model).map_err(|e| cant(&e))?;
+    if let Some((size, rgba)) = skin {
+        cpm_core::skin::use_skin_texture(&mut model, size, rgba);
+    }
+    check_texture(name, &model).map_err(|e| cant(&e))?;
     let old_conversion = converted_version(&desc).is_some_and(|v| v < CONVERTER_VERSION);
     Ok(PreviewModel { fit: rest_fit(&model), live_fit: None, model, old_conversion })
 }
 
 /// What a picker file's read gave: its icon at [`ICON_PX`] a side, or why it does not read.
+#[derive(Clone)]
 struct TileScan {
     icon: Option<Vec<u8>>,
     error: Option<String>,
@@ -2300,17 +2517,21 @@ fn drop_job(job: u64) {
 }
 
 /// Opens the picker on the `*.cpmmodel` files of `dir` (read again now), their icons read on a
-/// thread of their own.
+/// thread of their own. The skin's model comes first while the skin holds one ([`model_cycle`]):
+/// a name tile, [`CANT_READ`] when its data does not read.
 pub fn open_picker(dir: &Path) {
-    let files = list_models(dir);
+    let files = model_cycle(list_models(dir));
     let job = next_job();
     let scan = files.clone();
-    STATE.with_borrow_mut(|s| {
+    let skin_tile = STATE.with_borrow_mut(|s| {
         drop_picker(s);
         s.picker = Some(Picker { files, tiles: Vec::new(), scan_job: Some(job), page: 0, chosen: None, preview: Preview::Nothing });
         recompose(s);
+        let error = s.skin.as_ref().and_then(|k| k.model.as_ref()).is_some_and(|m| m.is_err());
+        TileScan { icon: None, error: error.then(|| CANT_READ.to_owned()) }
     });
-    spawn_job(job, move || JobOutcome::Tiles(scan.iter().map(|f| scan_tile(f)).collect()), || JobOutcome::Tiles(Vec::new()));
+    let tiles = move || scan.iter().map(|f| if is_skin(f) { skin_tile.clone() } else { scan_tile(f) }).collect();
+    spawn_job(job, move || JobOutcome::Tiles(tiles()), || JobOutcome::Tiles(Vec::new()));
 }
 
 /// Drops the picker and its jobs (the image is made again without it).
@@ -2361,12 +2582,23 @@ pub fn preview_select(i: usize) {
             drop_job(old);
         }
         recompose(s);
-        Some((path, data_dir))
+        // The skin's model reads from the skin, not a file.
+        let skin = is_skin(&path).then(|| s.skin.as_ref().map(|k| (k.model.clone(), k.texture.clone())));
+        Some((path, data_dir, skin))
     });
-    let Some((path, data_dir)) = start else { return };
+    let Some((path, data_dir, skin)) = start else { return };
     spawn_job(
         job,
-        move || JobOutcome::Preview(load_preview(&path, data_dir.as_deref()).map(Box::new)),
+        move || {
+            JobOutcome::Preview(
+                match skin {
+                    None => load_preview(&path, data_dir.as_deref()),
+                    Some(Some((Some(Ok(bytes)), texture))) => preview_bytes(SKIN_NAME, &bytes, data_dir.as_deref(), texture),
+                    Some(_) => Err(CANT_READ.to_owned()),
+                }
+                .map(Box::new),
+            )
+        },
         || JobOutcome::Preview(Err(CANT_READ.to_owned())),
     );
 }
@@ -2412,7 +2644,11 @@ pub fn picker_tiles() -> Vec<Tile> {
             .iter()
             .enumerate()
             .map(|(i, f)| Tile {
-                name: f.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                name: if is_skin(f) {
+                    SKIN_MODEL.to_owned()
+                } else {
+                    f.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                },
                 error: p.tiles.get(i).and_then(|t| t.error.clone()),
                 icon_at: placed.get(i).copied().flatten(),
                 scanning: p.scan_job.is_some(),
@@ -2582,16 +2818,20 @@ pub struct ConvertView<'a> {
 }
 
 /// The settings page: the model (button 0), the folder (button 1), `Convert project…` (button 2),
-/// the gist limit (button 3), `Gestures…` (button 4), then the last conversion's outcome and the
-/// model's error if any.
+/// the gist limit (button 3), `Gestures…` (button 4), then [`SKIN_IN_USE`] when `selected` (the
+/// [`active_selection`]) is the skin's model, the last conversion's outcome and the model's error
+/// if any.
 pub fn settings_labels(
     selected: Option<&Path>,
     error: Option<&str>,
     convert: &ConvertView<'_>,
 ) -> Vec<String> {
-    let model = selected
-        .and_then(Path::file_stem)
-        .map_or_else(|| "None".to_owned(), |s| s.to_string_lossy().into_owned());
+    let skin = selected.is_some_and(is_skin);
+    let model = if skin {
+        SKIN_MODEL.to_owned()
+    } else {
+        selected.and_then(Path::file_stem).map_or_else(|| "None".to_owned(), |s| s.to_string_lossy().into_owned())
+    };
     let mut labels = vec![
         format!("Model: {model}"),
         "Open models folder".to_owned(),
@@ -2599,6 +2839,9 @@ pub fn settings_labels(
         format!("Gist limit: {} KiB", convert.limit_kib),
         "Gestures…".to_owned(),
     ];
+    if skin {
+        labels.push(SKIN_IN_USE.to_owned());
+    }
     labels.extend(convert.last.map(convert_label));
     if convert.old_conversion {
         labels.push(old_conversion_note(&model));

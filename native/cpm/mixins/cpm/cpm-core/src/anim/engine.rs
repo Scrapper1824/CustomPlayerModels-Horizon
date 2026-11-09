@@ -681,6 +681,8 @@ pub struct Engine {
 /// Poses Java's `collectAnimations` always (or conditionally) adds, besides the main pose,
 /// that this engine can drive. Order matters for equal-priority stacking.
 const GLOBAL: Pose = Pose::Other(12);
+/// `VanillaPose.SKULL_RENDER`: a skull's pose ([`Engine::sample_skull`]).
+const SKULL_RENDER: Pose = Pose::Other(11);
 const HEALTH: Pose = Pose::Other(59);
 const HUNGER: Pose = Pose::Other(60);
 const AIR: Pose = Pose::Other(61);
@@ -1478,27 +1480,49 @@ impl Engine {
             }
         }
 
-        let parts = acc
-            .into_iter()
-            .map(|(id, a)| {
-                let rel = |g: Option<([f32; 3], bool)>| g.is_some_and(|(_, r)| r);
-                let groups = [a.pos, a.rot, a.scale];
-                let delta = PartDelta {
-                    pos: a.pos.map(|g| g.0),
-                    rot: a.rot.map(|g| g.0),
-                    scale: a.scale.map(|g| g.0),
-                    color: a.color,
-                    visible: a.visible,
-                    additive: groups.iter().any(|g| g.is_some()) && groups.iter().all(|g| g.is_none_or(|(_, r)| r)),
-                    pos_additive: rel(a.pos),
-                    rot_additive: rel(a.rot),
-                    scale_additive: rel(a.scale),
-                };
-                (id, delta)
-            })
-            .collect();
-        Frame { parts }
+        frame_of(acc)
     }
+
+    /// The frame of a skull (`AnimationEngine.handleAnimation` in `AnimationMode.SKULL`): only the
+    /// `SKULL_RENDER` and then the `GLOBAL` pose animations, by priority, each looping on the clock
+    /// (`time_ms`). Nothing else plays there (no main pose, gesture or layer), and the player's own
+    /// animation state is left alone: Java poses a skull with a profile of its own.
+    pub fn sample_skull(&self, time_ms: u64) -> Frame {
+        let mut clips: Vec<usize> = [SKULL_RENDER, GLOBAL]
+            .iter()
+            .flat_map(|want| self.set.poses.iter().enumerate().filter(move |(_, (p, _))| p == want).map(|(i, _)| i))
+            .collect();
+        clips.sort_by_key(|&i| self.set.poses[i].1.priority);
+        let mut acc: HashMap<u32, Acc> = HashMap::new();
+        for i in clips {
+            animate(&self.set.poses[i].1, &self.pose_curves[i], time_ms, &mut acc);
+        }
+        frame_of(acc)
+    }
+}
+
+/// The frame of what [`animate`] accumulated.
+fn frame_of(acc: HashMap<u32, Acc>) -> Frame {
+    let parts = acc
+        .into_iter()
+        .map(|(id, a)| {
+            let rel = |g: Option<([f32; 3], bool)>| g.is_some_and(|(_, r)| r);
+            let groups = [a.pos, a.rot, a.scale];
+            let delta = PartDelta {
+                pos: a.pos.map(|g| g.0),
+                rot: a.rot.map(|g| g.0),
+                scale: a.scale.map(|g| g.0),
+                color: a.color,
+                visible: a.visible,
+                additive: groups.iter().any(|g| g.is_some()) && groups.iter().all(|g| g.is_none_or(|(_, r)| r)),
+                pos_additive: rel(a.pos),
+                rot_additive: rel(a.rot),
+                scale_additive: rel(a.scale),
+            };
+            (id, delta)
+        })
+        .collect();
+    Frame { parts }
 }
 
 /// `VanillaPose.calcHeadYaw` with the body yaw at 0: signed relative yaw mapped to 0..1.

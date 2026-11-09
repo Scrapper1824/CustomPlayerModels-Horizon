@@ -284,6 +284,12 @@ impl LoadedModel {
     pub fn pose_arm(&self, left: bool) -> Vec<PosedBox> {
         pose_arm(&self.model, left)
     }
+
+    /// The model's head as a player head shows it ([`pose_skull`]) at `time_ms`, posed by the
+    /// skull's own animations ([`Engine::sample_skull`]).
+    pub fn pose_skull(&self, time_ms: u64) -> Vec<PosedBox> {
+        pose_skull(&self.model, &self.engine.sample_skull(time_ms))
+    }
 }
 
 /// The model's icon (the file's icon block) as RGBA: (width, height, pixels). `None` when it has
@@ -296,7 +302,7 @@ pub fn icon_rgba(file: &ModelFile) -> Option<(u32, u32, Vec<u8>)> {
     (w > 0 && h > 0).then_some((w, h, rgba))
 }
 
-fn decode_png(bytes: &[u8]) -> Result<([u32; 2], Vec<u8>)> {
+pub(crate) fn decode_png(bytes: &[u8]) -> Result<([u32; 2], Vec<u8>)> {
     let err = |e: png::DecodingError| CpmError::Png(e.to_string());
     let mut d = png::Decoder::new(std::io::Cursor::new(bytes));
     d.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -1151,12 +1157,17 @@ fn dup_root_boxes(model: &Model, states: &States, b: usize, root: Mat4, out: &mu
 
 /// Bone `b`'s vanilla part and its second layer (`PlayerPartValues`) under `m`.
 fn vanilla_boxes(model: &Model, b: usize, m: Mat4, out: &mut Sink) {
+    vanilla_boxes_inflated(model, b, m, layer_inflate(b), out);
+}
+
+/// [`vanilla_boxes`] with the second layer inflated by `inflate`.
+fn vanilla_boxes_inflated(model: &Model, b: usize, m: Mat4, inflate: f32, out: &mut Sink) {
     {
         let values = part_values(b, model.skin_type);
         let sheet = sheet_scale(model.texture_size);
         let layers = [
             (values.uv, 0.0, BoxSource::Vanilla(b)),
-            (values.uv2, layer_inflate(b), BoxSource::VanillaLayer(b)),
+            (values.uv2, inflate, BoxSource::VanillaLayer(b)),
         ];
         for (uv, inflate, source) in layers {
             out.boxes.push(PosedBox {
@@ -1209,6 +1220,66 @@ pub fn pose_arm(model: &Model, left: bool) -> Vec<PosedBox> {
     let mut out = Sink::new();
     bone_boxes(model, &states, bone, m, &mut out);
     dup_root_boxes(model, &states, bone, base, &mut out);
+    out.boxes
+}
+
+/// `SkullModel.createHumanoidHeadLayer`: the skull's hat is inflated by 0.25 (the player's by 0.5).
+const SKULL_HAT_INFLATE: f32 = 0.25;
+
+/// The model's head as a player head shows it (`RedirectHolderSkull` in `AnimationMode.SKULL`):
+/// only the head bone, drawn in place of the skull model's `head` part.
+///
+/// - **Parts:** the head's kept vanilla part with the skull's hat (`renderParent` draws the skull
+///   part, its hat inflated by [`SKULL_HAT_INFLATE`]), then the head's cubes and those of its
+///   duplicated roots. Nothing of the other bones.
+/// - **Pose:** `frame` (the `SKULL_RENDER` and `GLOBAL` poses: [`Engine::sample_skull`]) moves the
+///   cubes. The head root itself stays where the skull part is (`skipTransform` in skull mode):
+///   its part position, rotation and animation are not applied, and every duplicated root of
+///   the head is drawn there too. The render transform does not apply (player mode only).
+/// - **Placement:** the vanilla part is `PlayerPartValues.HEAD` at the part's origin (offset
+///   (-4, -8, -4), 8 a side), as the skull's own head box.
+///
+/// Each [`PosedBox::transform`] maps box-local model pixels into the skull `head` part's frame
+/// in blocks (Y down, the part's pose not yet applied), so a box is drawn at the head part's
+/// matrix times `transform`.
+pub fn pose_skull(model: &Model, frame: &Frame) -> Vec<PosedBox> {
+    let none = PartDelta::default();
+    let roots = std::array::from_fn(|b| {
+        let bone = &model.bones[b];
+        if b != HEAD {
+            return (Vec3::from_array(bone.pivot), deg(bone.rotation));
+        }
+        // setRootPosAndRot from the skull part (at the origin, not turned): what the head's copy
+        // transforms and children read; not where it is drawn.
+        let values = part_values(b, model.skin_type);
+        let pos_n = Vec3::from_array(bone.pivot) - Vec3::from_array(values.pos);
+        let d = frame.parts.get(&(b as u32)).unwrap_or(&none);
+        (delta_pos(pos_n, d), delta_rot(deg(bone.rotation), d))
+    });
+    // The vanilla parts at rest, as the duplicated roots take them: the head is the skull part.
+    let vanilla = std::array::from_fn(|b| {
+        let pos = if b == HEAD { Vec3::ZERO } else { Vec3::from_array(part_values(b, model.skin_type).pos) };
+        (pos, Vec3::ZERO)
+    });
+    let bases = extra_bases(model, &roots, &vanilla, &PoseInput::default());
+    let states = States::new(model, frame, roots, &bases);
+    let m = Mat4::from_scale(Vec3::splat(1.0 / PIXELS_PER_BLOCK));
+    let skin = Paint { texture: BoxTexture::Skin, texture_px: model.texture_size };
+    let mut out = Sink::new();
+    if model.keep_vanilla[HEAD] {
+        vanilla_boxes_inflated(model, HEAD, m, SKULL_HAT_INFLATE, &mut out);
+    }
+    for &c in &model.roots_by_bone[HEAD] {
+        walk(model, &states, c, m, skin, &mut out);
+    }
+    for r in model.dup_roots.iter().filter(|r| r.bone == HEAD) {
+        if states.cube(r.node).visible {
+            vanilla_boxes_inflated(model, HEAD, m, SKULL_HAT_INFLATE, &mut out);
+        }
+        for &c in &model.cubes[r.node].children {
+            walk(model, &states, c, m, skin, &mut out);
+        }
+    }
     out.boxes
 }
 

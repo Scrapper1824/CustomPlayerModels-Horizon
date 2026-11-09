@@ -21,7 +21,7 @@ or use the launcher window's **Build** button described below.
 
 **As an installed mod (kept with the instance's other native mods):**
 
-1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.1.4.hnmod`.
+1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.1.5.hnmod`.
 2. Copy it to `%APPDATA%\horizon\horizon-native-mods\cpm.hnmod`. Create the folder if it is missing.
 3. Turn it on: add the line `mod.cpm:true` to `%APPDATA%\horizon\horizon-mods.txt`. Create the file if it is
    missing. The launcher builds only the native mods that are turned on there.
@@ -52,8 +52,27 @@ Options → Mods.
 3. Press F5 to see yourself.
 
 If a model cannot be drawn, the settings page shows an `Error:` line (also in the log, `cpm: <file>: ...`). A
-model needs its own embedded texture (no skin fallback yet), and the texture must be at most 1020x1024 (with
+model file needs its own embedded texture (no skin fallback yet), and the texture must be at most 1020x1024 (with
 the model's elytra and cape textures, if it has them, beside it: their widths plus 4 at most 1024).
+
+### Model stored in your skin
+
+CPM can store a model in the free pixels of a skin (its editor's export to skin), so it travels with your Mojang
+skin. The mod reads it from your downloaded skin file (the game's skin cache, `assets/skins/<2 hex>/<digest>`, the
+PNG as downloaded: the game's processed copy loses the data), as CPM's `SkinDataInputStream` does with its free
+space template: the slim or wide channel per your skin's model, turning to the other when the stored model says
+it is of the other type.
+
+- **When nothing is chosen** (Model: None), the skin's model is drawn, as in CPM. The Model button then shows
+  **Your skin's model**, and the settings page says `Using the model stored in your skin`.
+- **Choosing it**: while your skin holds a model, **Your skin's model** comes first in the Model button's cycle and
+  in the picker (a name tile); choosing it keeps the `model` setting as `<skin>`. A chosen file is drawn instead.
+- **Links** in it (CPM's usual export: the model in a gist) download and are cached as a link model's.
+- **Texture**: a stored model without a texture of its own draws with your skin, as the game draws it.
+- **No model**: a skin without one (or a default or offline skin) draws you vanilla, with no error, even with
+  **Your skin's model** chosen. Data that does not read (a bad checksum, cut short) is an `Error:` line,
+  `cpm: skin model: ...`.
+- Only your own skin is read; a skin change (a new download) reads it again.
 
 A model's animated textures (regions of its skin, cape or elytra texture that step through frames, or blend from
 one frame into the next) play as in CPM, in the world and in the gesture menu's and picker's previews. The texture
@@ -208,6 +227,28 @@ is the game's own and does not move with it. This hooks the game's own
 `first_person_arm` function, not a named hook point, so it holds for the pinned Horizon commit only: a Horizon
 that renamed or changed that function fails to build the mod.
 
+### Player heads
+
+A player head whose profile is yours shows your model's head instead of the vanilla skull, as CPM's skull
+renderers do (`AnimationMode.SKULL`): the head and its cubes only (the vanilla head and its hat too if the model
+keeps them), posed by the model's **Skull render** and **Global** animations, with the head where the skull's
+head is. The head part's own position, rotation and animation are not applied there, as in CPM. Yours means its
+UUID is yours, or, for a head with no UUID, its name: on a server, the account or name you joined with; in a
+world of your own, its player and your signed-in account. Other players' heads stay vanilla until multiplayer.
+
+- **Shown:** a player head held, in a slot, dropped or in an item frame; worn by you (with **Hide head if
+  skull** still hiding the body model's head), by a mob or by an armor stand. All of them are drawn through the
+  game's player-head item renderer (`item_render::special::submit`, `PlayerHeadSpecialRenderer`), which this
+  hooks: the game's own function, not a named hook point, so it holds for the pinned Horizon commit only. That
+  renderer is in the game's client library, which cannot reach the mod's code, so the frame hook hands it the
+  drawing (`item_render::cpm_skull_hook`). The vanilla skull is left out only when the model's head was drawn.
+- **Not shown (vanilla):** a player head placed as a block. Horizon draws placed skulls in its block-entity
+  renderer (`horizon-client-render`'s `render_one`), another crate again, with only the head's skin there and not
+  its profile, and with geometry it may keep between frames, so it is not hooked.
+- **Drawing:** the head is drawn with the model's texture in the head renderer's light. Glowing faces are drawn
+  at full block light; the separate additive glow pass of the player model is not available to the item
+  renderer.
+
 ### Converting projects
 
 The CPM editor saves its work as a `.cpmproject`. To play one without exporting it in the editor first, press
@@ -277,7 +318,7 @@ in-game test model) and an unknown loader are errors (`unsupported link`).
 
 ## Not supported (yet)
 
-Other players' models, modded armor, the enchantment glint in the preview, and items and parrots in the
+Other players' models (and their player heads), placed player heads, modded armor, the enchantment glint in the preview, and items and parrots in the
 preview. Duplicated root parts (a second head, arm and so on) are drawn as
 CPM draws them: they follow their body part's pose with their own offset, draw that part's skin box and second
 layer unless hidden, take their animations and draw their cubes. Extruded parts are drawn as CPM draws them (the texture
@@ -287,10 +328,10 @@ sliced per texel, so its transparent texels leave holes).
 
 | File | What it is |
 |---|---|
-| `mixins/cpm/horizon-mixin.toml` | The bundle: thirteen modules, the HEAD hooks (and the `first_person_arm` injection), the `cpm-core` crate and the `[api]` package |
+| `mixins/cpm/horizon-mixin.toml` | The bundle: sixteen modules, the HEAD hooks (and the `first_person_arm` and `player_head` injections), the `cpm-core` crate and the `[api]` package |
 | `mixins/cpm/api/` | A trait-mod package that overrides nothing. It puts CPM in the game's mod list, which the game needs before it reserves the `horizon/modimage` sprite the model's texture goes in |
 | `mixins/cpm/runtime.rs` | State and logic, added to the game as `game::cpm_mod`; also this crate's library, for its tests |
-| `mixins/cpm/*.rs` | One small helper per hook (frame, listened, player_submit, first_person_arm, mods list, settings, click, key, and CPM's mod screen's screen_render, screen_click, screen_release, screen_drag, screen_scroll, screen_key, screen_char); `draw.rs` (`game::cpm_draw`) draws quads for player_submit and first_person_arm; `pose_probe.rs` (`game::cpm_pose_probe`), `action_probe.rs` (`game::cpm_action_probe`), `equipment_probe.rs` (`game::cpm_equipment_probe`), `cape_probe.rs` (`game::cpm_cape_probe`) `item_probe.rs` (`game::cpm_item_probe`) and `parrot_probe.rs` (`game::cpm_parrot_probe`) read the local player's state, its actions, what it wears, its cape, what it holds and its shoulder parrots for player_submit (`item_probe.rs` also draws the held and head items, `parrot_probe.rs` the parrots); `convert.rs` (`game::cpm_convert`) runs the file picker and the `.cpmproject` conversion on its own thread; `gist_fetch.rs` (`game::cpm_gist_fetch`) downloads a model's links (gists and CPM's other loaders) on its own thread; `screen.rs` (`game::cpm_screen`) routes those screen hooks to the CPM screen shown: `gist_screen.rs` (`game::cpm_gist`), the gist popup for a model too big to send directly, or `gesture_screen.rs` (`game::cpm_menu`), the gesture menu |
+| `mixins/cpm/*.rs` | One small helper per hook (frame, listened, player_submit, first_person_arm, player_head, mods list, settings, click, key, and CPM's mod screen's screen_render, screen_click, screen_release, screen_drag, screen_scroll, screen_key, screen_char); `draw.rs` (`game::cpm_draw`) draws quads for player_submit and first_person_arm, and a player head's quads; `player_head.rs`, at the head of the game's player-head item renderer, places the skull's head part and asks `skull_hook.rs` (`item_render::cpm_skull_hook`, in the client library) for that drawing; `head_probe.rs` (`game::cpm_head_probe`) reads your identities and a head's profile; `pose_probe.rs` (`game::cpm_pose_probe`), `action_probe.rs` (`game::cpm_action_probe`), `equipment_probe.rs` (`game::cpm_equipment_probe`), `cape_probe.rs` (`game::cpm_cape_probe`) `item_probe.rs` (`game::cpm_item_probe`) and `parrot_probe.rs` (`game::cpm_parrot_probe`) read the local player's state, its actions, what it wears, its cape, what it holds and its shoulder parrots for player_submit (`item_probe.rs` also draws the held and head items, `parrot_probe.rs` the parrots); `skin_probe.rs` (`game::cpm_skin_probe`) reads the local player's downloaded skin file for the model stored in it; `convert.rs` (`game::cpm_convert`) runs the file picker and the `.cpmproject` conversion on its own thread; `gist_fetch.rs` (`game::cpm_gist_fetch`) downloads a model's links (gists and CPM's other loaders) on its own thread; `screen.rs` (`game::cpm_screen`) routes those screen hooks to the CPM screen shown: `gist_screen.rs` (`game::cpm_gist`), the gist popup for a model too big to send directly, or `gesture_screen.rs` (`game::cpm_menu`), the gesture menu |
 | `mixins/cpm/cpm-core/` | The `.cpmmodel` reader, model, animation engine and posing, free of the game |
 
 ```sh
@@ -298,7 +339,7 @@ sliced per texel, so its transparent texels leave holes).
 (cd native/cpm/mixins/cpm/cpm-core && cargo test)   # the reader and engine
 python native/tools/native.py check cpm        # apply on the tested Horizon and cargo check the game
                                                # (with the generated game executable the [api] package needs)
-python native/tools/native.py package cpm      # native/target/cpm-0.1.4.hnmod
+python native/tools/native.py package cpm      # native/target/cpm-0.1.5.hnmod
 ```
 
 `cargo test` inside `cpm-core` leaves a `Cargo.lock` and a `target/` there. Delete both before `check`:
@@ -307,4 +348,5 @@ horizon-mixins refuses a bundle crate that ships its own `Cargo.lock`.
 ## Credits
 
 Customizable Player Models is by tom5454, under the MIT License: this mod ports its file format and animation
-behaviour to Horizon. This mod is under the MIT License too (`LICENSE`).
+behaviour to Horizon. `mixins/cpm/cpm-core/src/free_space_template.png` is CPM's free space template
+(`assets/cpm/textures/template/free_space_template.png`), bundled unchanged under the same license. This mod is under the MIT License too (`LICENSE`).

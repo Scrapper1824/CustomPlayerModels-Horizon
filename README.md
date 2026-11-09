@@ -34,8 +34,8 @@ It also converts `.cpmproject` files from the CPM editor into `.cpmmodel` files.
 | Animated textures | 🟢 | 🟢 |
 | Enchantment glint, emissive and custom (resource-pack / CIT) armour | 🟢 | 🟢 |
 | Parrots on shoulder parts (tool and any-slot parts draw nothing, as in CPM) | 🟢 | 🟢 |
-| Models on player heads (skulls) | 🟢 | 🔴 |
-| Model stored in the skin file | 🟢 | 🔴 |
+| Models on player heads (skulls) (your own head until multiplayer) | 🟢 | 🟢 |
+| Model stored in the skin file | 🟢 | 🟢 |
 
 ### Animations
 
@@ -113,7 +113,7 @@ The full guide, with every setting, the gist flow and the known differences from
 python native/tools/native.py package cpm
 ```
 
-This writes `native/target/cpm-0.1.4.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
+This writes `native/target/cpm-0.1.5.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
 straight into the game:
 
 ```sh
@@ -127,7 +127,9 @@ they skip when the files are missing (see `native/cpm/mixins/cpm/cpm-core/tests/
 ## Credits
 
 - [Customizable Player Models](https://github.com/tom5454/CustomPlayerModels) by tom5454 (MIT). This port follows
-  its file format and behaviour.
+  its file format and behaviour. `free_space_template.png` (in `native/cpm/mixins/cpm/cpm-core/src/`, which
+  marks the skin pixels a model is stored in) is CPM's own `assets/cpm/textures/template/free_space_template.png`,
+  bundled unchanged (MIT).
 - [Horizon](https://github.com/horizon-rust/horizon) by Ludovic Marie and the Horizon contributors (MIT).
   `native/tools/native.py` comes from Horizon.
 
