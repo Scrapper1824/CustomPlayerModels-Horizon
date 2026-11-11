@@ -79,14 +79,14 @@ It also converts `.cpmproject` files from the CPM editor into `.cpmmodel` files.
 | Feature | Original CPM | This port |
 |---|:-:|:-:|
 | Your own model | 🟢 | 🟢 |
-| Other players' models | 🟢 | 🔴 |
+| Other players' models | 🟢 | 🟢 (from their skin, not yet tested with a second player; CPM servers and Horizon worlds coming) |
 | Server plugin and model sync | 🟢 | 🔴 |
 | Gameplay scaling (size, eye height, hitbox, reach, attributes) | 🟢 | 🔴 (needs CPM's server plugin) |
 
 ## Install
 
 You need [Horizon](https://github.com/horizon-rust/horizon) and its launcher. This mod was built and tested against
-Horizon commit `02c8607` (`horizon_revision` in `native/cpm/mixins/cpm/horizon-mixin.toml`). Other Horizon
+Horizon nightly 2026-11-08 (commit `fdc87ae`) (`horizon_revision` in `native/cpm/mixins/cpm/horizon-mixin.toml`). Other Horizon
 versions may not build it.
 
 1. Download `cpm.hnmod` from the [latest release](../../releases/latest).
@@ -121,7 +121,7 @@ The full guide, with every setting, the gist flow and the known differences from
 python native/tools/native.py package cpm
 ```
 
-This writes `native/target/cpm-0.1.5.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
+This writes `native/target/cpm-0.2.0.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
 straight into the game:
 
 ```sh

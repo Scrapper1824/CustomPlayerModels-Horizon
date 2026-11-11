@@ -1,14 +1,14 @@
 [mod]
 id = "cpm"
-version = "0.1.5"
+version = "0.2.0"
 priority = 100
 
-# The commit it was tested on. It uses the native hook points (hooks 355 in compatibility.json)
+# The commit it was tested on. It uses the native hook points (hook points v411 in compatibility.json)
 # and two functions of the game's own, `Game::first_person_arm` (injection `first_person_arm`) and
 # `item_render::special::submit` (injection `player_head`), raw targets no hook catalog keeps
 # stable: a Horizon that renamed or changed them fails to build.
 [compatibility]
-horizon_revision = "02c8607ee8ebd216f2f535c1eb7b62b572830df2"
+horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
 
 # A trait-mod package that overrides nothing (api/src/lib.rs). It puts CPM in the game's mod list
 # (`mod_api::mods()`): the game reserves the `horizon/modimage` sprite, which holds the model's
@@ -23,7 +23,8 @@ file = "crates/horizon-client/src/game.rs"
 name = "cpm_mod"
 source = "runtime.rs"
 
-# Once a frame: read the stored model choice (once), load it, (re)upload its texture.
+# Once a frame: read the stored model choice (once), load it, load the other players' skin models
+# (on threads of their own), (re)upload the textures.
 [[injection]]
 id = "frame"
 hook = "frame"
@@ -32,7 +33,8 @@ kind = "HEAD"
 helper = "frame.rs"
 bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
 
-# Ask the game to pose players for native_player_submit (only with a model loaded).
+# Ask the game to pose players for native_player_submit (only with a model to draw: the local
+# player's or another player's).
 [[injection]]
 id = "listened"
 hook = "player_render_listened"
@@ -44,7 +46,7 @@ bindings = [
   { name = "listened", ty = "&mut bool", value = "&mut *listened" },
 ]
 
-# Draw the local player with the model.
+# Draw the local player with the model, and the other players with theirs.
 [[injection]]
 id = "player_submit"
 hook = "player_submit"
@@ -160,13 +162,23 @@ file = "crates/horizon-client/src/game.rs"
 name = "cpm_cape_probe"
 source = "cape_probe.rs"
 
-# The local player's downloaded skin (the raw PNG in the game's skin cache, for the model stored in
-# it, and the skin as drawn), which the frame hook hands to runtime.rs (no hook of its own).
+# The players' downloaded skins (the raw PNG in the game's skin cache, for the model stored in it,
+# and the skin as drawn): the local player's, and the other players in the world with how their
+# skin files read, which the frame hook hands to runtime.rs (no hook of its own).
 [[module]]
 id = "skin_probe"
 file = "crates/horizon-client/src/game.rs"
 name = "cpm_skin_probe"
 source = "skin_probe.rs"
+
+# Another player in the world as the game knows them (their mob's flags, pose, swing, item in
+# use, held and worn stacks, cape, parrots), which player_submit uses for the players other than
+# the local one (no hook of its own).
+[[module]]
+id = "others_probe"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_others_probe"
+source = "others_probe.rs"
 
 # What the local player wears (armour, trims, elytra) and the atlas textures for it, which
 # player_submit uses (no hook of its own).

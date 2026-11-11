@@ -7,18 +7,19 @@ use std::time::Duration;
 
 /// How long the download may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
-/// The most text taken, in bytes.
-const MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Downloads `link`'s text on a new thread from `urls` (`cpm_core::link::link_urls`): the next URL
 /// is tried only when one does not connect or times out (`PasteResourceLoader`'s fallback), then
-/// hands the text, or why there is none, to `finish_fetch`.
+/// hands the text, or why there is none, to `finish_fetch`. `link` is the download's key: it
+/// says how much may be taken (`cpm_mod::fetch_limit`: 16 MiB for the local player's links, CPM's
+/// 100 KB for other players'), and the download stops past that (`HttpResourceLoader`).
 pub fn fetch(link: String, urls: Vec<String>) {
     use crate::game::cpm_mod as cpm;
+    let max = cpm::fetch_limit(&link);
     let thread_link = link.clone();
     let spawned = std::thread::Builder::new().name("cpm-gist".into()).spawn(move || {
         // A panic must still end the download, or the link would stay in flight for good.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| download_any(&urls)))
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| download_any(&urls, max)))
             .unwrap_or_else(|_| Err("download crashed".to_owned()));
         match &result {
             Ok(text) => log::info!("cpm: downloaded {thread_link} ({} bytes)", text.len()),
@@ -33,10 +34,10 @@ pub fn fetch(link: String, urls: Vec<String>) {
 
 /// The first of `urls` that connects: an HTTP error answer is final, a transport error (no
 /// connection, timeout) moves on to the next URL.
-fn download_any(urls: &[String]) -> Result<Vec<u8>, String> {
+fn download_any(urls: &[String], max: u64) -> Result<Vec<u8>, String> {
     let mut last = "no URL".to_owned();
     for url in urls {
-        match download(url) {
+        match download(url, max) {
             Ok(body) => return Ok(body),
             Err((e, transport)) => {
                 last = e;
@@ -49,9 +50,9 @@ fn download_any(urls: &[String]) -> Result<Vec<u8>, String> {
     Err(last)
 }
 
-/// The body at `url`, at most [`MAX_BYTES`], gzip accepted (`HttpResourceLoader`). The error says
-/// whether it was a transport one.
-fn download(url: &str) -> Result<Vec<u8>, (String, bool)> {
+/// The body at `url`, at most `max` bytes (read no further), gzip accepted (`HttpResourceLoader`).
+/// The error says whether it was a transport one.
+fn download(url: &str, max: u64) -> Result<Vec<u8>, (String, bool)> {
     let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
     let response = agent.get(url).set("Accept-Encoding", "gzip").call().map_err(|e| {
         let transport = matches!(e, ureq::Error::Transport(_));
@@ -64,9 +65,10 @@ fn download(url: &str) -> Result<Vec<u8>, (String, bool)> {
         Box::new(response.into_reader())
     };
     let mut body = Vec::new();
-    reader.take(MAX_BYTES + 1).read_to_end(&mut body).map_err(|e| (e.to_string(), false))?;
-    if body.len() as u64 > MAX_BYTES {
-        return Err((format!("larger than {} MiB", MAX_BYTES / (1024 * 1024)), false));
+    reader.take(max + 1).read_to_end(&mut body).map_err(|e| (e.to_string(), false))?;
+    if body.len() as u64 > max {
+        let size = if max >= 1024 * 1024 { format!("{} MiB", max / (1024 * 1024)) } else { format!("{} KiB", max / 1024) };
+        return Err((format!("larger than {size}"), false));
     }
     Ok(body)
 }

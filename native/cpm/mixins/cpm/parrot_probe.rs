@@ -25,10 +25,21 @@ pub(super) fn draw_parrots(
     shoulders: &[cpm_core::ShoulderAnchor],
     partial: f32,
 ) {
+    if let Some(m) = game.player_model.as_ref() {
+        draw_parrots_of(game, draw, shoulders, partial, m);
+    }
+}
+
+/// [`draw_parrots`] for the player `m` (the local player's model, or another player's mob:
+/// others_probe.rs), from its own `shoulder_parrots`.
+pub(super) fn draw_parrots_of(
+    game: &crate::game::Game<'_>,
+    draw: &mut crate::game::native_block_entity_draw::BlockEntityDraw,
+    shoulders: &[cpm_core::ShoulderAnchor],
+    partial: f32,
+    m: &horizon_client::mobs::Mob,
+) {
     use glam::{Mat4, Vec3};
-    let Some(m) = game.player_model.as_ref() else {
-        return;
-    };
     if !horizon_client::mobs::render::layers_shown(m) {
         return;
     }

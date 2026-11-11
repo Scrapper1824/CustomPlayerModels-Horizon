@@ -7,7 +7,11 @@
 /// `partial`; `None` when no cape layer is drawn: outside a world, or a spectator (who draws no
 /// layers).
 pub(super) fn motion(game: &crate::game::Game<'_>, partial: f32) -> Option<cpm_core::CapeState> {
-    let m = game.player_model.as_ref()?;
+    motion_of(game.player_model.as_ref()?, partial)
+}
+
+/// [`motion`] for the player `m` (the local player's model, or another player's mob).
+pub(super) fn motion_of(m: &horizon_client::mobs::Mob, partial: f32) -> Option<cpm_core::CapeState> {
     if !horizon_client::mobs::render::layers_shown(m) {
         return None;
     }
@@ -33,16 +37,24 @@ pub(super) fn invisible(game: &crate::game::Game<'_>) -> bool {
 
 /// The player's cape texture, when the atlas has it.
 pub(super) fn sprite(game: &crate::game::Game<'_>) -> Option<String> {
-    let cape = game.player_model.as_ref()?.cape.as_deref()?;
+    sprite_of(game, game.player_model.as_ref()?)
+}
+
+/// [`sprite`] for the player `m`.
+pub(super) fn sprite_of(game: &crate::game::Game<'_>, m: &horizon_client::mobs::Mob) -> Option<String> {
+    let cape = m.cape.as_deref()?;
     game.gui.atlas.sprites.contains_key(cape).then(|| cape.to_owned())
 }
 
 /// Whether the chest item's equipment asset has a `wings` layer (no cape) and a `humanoid` one
 /// (the cape moved out over it), as `player_cape_geometry` reads them.
 pub(super) fn chest_layers(game: &crate::game::Game<'_>) -> (bool, bool) {
-    let layers = game.armor[1]
-        .as_ref()
-        .map(|s| &*s.item)
+    chest_layers_of(game, game.armor[1].as_ref().map(|s| &*s.item))
+}
+
+/// [`chest_layers`] for the chest item `chest` (another player's: others_probe.rs).
+pub(super) fn chest_layers_of(game: &crate::game::Game<'_>, chest: Option<&str>) -> (bool, bool) {
+    let layers = chest
         .and_then(|item| game.res.items().get(item))
         .and_then(|i| i.equip_asset.as_ref())
         .and_then(|asset| game.armor_stand_assets.equipment.get(asset));

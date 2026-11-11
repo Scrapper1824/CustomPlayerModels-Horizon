@@ -12,7 +12,7 @@ use crate::mesh::LoadedModel;
 use crate::write::{Writer, checksummed};
 
 /// CPM's `assets/cpm/textures/template/free_space_template.png`.
-pub const TEMPLATE_PNG: &[u8] = include_bytes!("free_space_template.png");
+pub const TEMPLATE_PNG: &[u8] = include_bytes!("../data/free_space_template.png");
 
 const END: u8 = 0;
 const SKIN_TYPE: u8 = 11;

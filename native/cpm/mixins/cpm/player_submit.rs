@@ -1,5 +1,6 @@
-// The local player, drawn with the loaded model instead of the vanilla one. Anything missing (no
-// model, its texture not uploaded, the sprite unknown) leaves `drawn` false: the vanilla player.
+// The local player, drawn with the loaded model instead of the vanilla one, and the other players
+// with theirs (the models stored in their skins). Anything missing (no model, its texture not
+// uploaded, the sprite unknown) leaves `drawn` false: the vanilla player.
 fn cpm_player_submit(
     game: &crate::game::Game<'_>,
     player: &crate::game::native_mob_draw::NativeMobRender<'_>,
@@ -8,7 +9,11 @@ fn cpm_player_submit(
     drawn: &mut bool,
 ) {
     use crate::game::{cpm_mod as cpm, cpm_pose_probe as probe};
-    if *drawn || !who.local || !game.native_on(cpm::ID) {
+    if *drawn || !game.native_on(cpm::ID) {
+        return;
+    }
+    if !who.local {
+        crate::game::cpm_others_probe::submit(game, player, draw, drawn);
         return;
     }
     let flags = probe::flags(game);

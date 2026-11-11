@@ -15,6 +15,8 @@ pub enum CpmError {
     BlockTooBig(u32),
     Invalid(String),
     Png(String),
+    /// Past a safety limit (a texture's size, the cube count): the model is refused as it is.
+    Limit(String),
     /// The model is a link model; the string is its link (`git:<user>/<id>`).
     NeedsLink(String),
 }
@@ -30,6 +32,7 @@ impl fmt::Display for CpmError {
             CpmError::BlockTooBig(n) => write!(f, "block too big: {n} bytes"),
             CpmError::Invalid(s) => write!(f, "invalid data: {s}"),
             CpmError::Png(s) => write!(f, "png error: {s}"),
+            CpmError::Limit(s) => write!(f, "{s}"),
             CpmError::NeedsLink(l) => write!(f, "model is a link to {l}"),
         }
     }

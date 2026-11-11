@@ -51,6 +51,20 @@ pub(super) fn draw_items(
     id: u32,
     walk: f32,
 ) {
+    draw_items_owned(game, draw, items, held, id, walk, &|stack| game.player_owner(Some(stack)));
+}
+
+/// [`draw_items`] for any player: `owner` gives a held stack's owner (the local player's, or
+/// another player's as Horizon's `held_item_geometry` makes it: others_probe.rs).
+pub(super) fn draw_items_owned(
+    game: &crate::game::Game<'_>,
+    draw: &mut crate::game::native_block_entity_draw::BlockEntityDraw,
+    items: &[crate::game::cpm_mod::ItemDraw],
+    held: &Held<'_>,
+    id: u32,
+    walk: f32,
+    owner: &dyn Fn(&ItemStack) -> horizon_assets::item_model::OwnerState,
+) {
     use crate::game::cpm_mod as cpm;
     use glam::Mat4;
     use horizon_assets::item_model::{DisplayContext, SpecialKind, SpecialModel};
@@ -117,7 +131,7 @@ pub(super) fn draw_items(
                 cpm_core::ItemSlot::OffHand => horizon_client::cit::Hand::Off,
                 _ => horizon_client::cit::Hand::Main,
             };
-            let owner = game.player_owner(Some(stack));
+            let owner = owner(stack);
             let state = game.resolve_item_in_hand(stack, display, Some(&owner), id as i32 + item.seed, hand);
             // An empty stack or one with no model draws nothing.
             game.submit_item_world(&state, t, light, &mut *verts);

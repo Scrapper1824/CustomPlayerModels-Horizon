@@ -2,7 +2,8 @@
 
 Draws you (the local player) with a [Customizable Player Models](https://github.com/tom5454/CustomPlayerModels)
 model: a `.cpmmodel` file exported from the CPM editor. The model's own animations play (walking, sneaking,
-swimming, flying, ...), and a gesture menu plays its gestures and custom poses. Other players stay vanilla.
+swimming, flying, ...), and a gesture menu plays its gestures and custom poses. Other players are drawn with the
+models stored in their skins (see [Other players](#other-players)); CPM servers and Horizon worlds are to come.
 
 ## Install
 
@@ -21,7 +22,7 @@ or use the launcher window's **Build** button described below.
 
 **As an installed mod (kept with the instance's other native mods):**
 
-1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.1.5.hnmod`.
+1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.2.0.hnmod`.
 2. Copy it to `%APPDATA%\horizon\horizon-native-mods\cpm.hnmod`. Create the folder if it is missing.
 3. Turn it on: add the line `mod.cpm:true` to `%APPDATA%\horizon\horizon-mods.txt`. Create the file if it is
    missing. The launcher builds only the native mods that are turned on there.
@@ -72,7 +73,8 @@ it is of the other type.
 - **No model**: a skin without one (or a default or offline skin) draws you vanilla, with no error, even with
   **Your skin's model** chosen. Data that does not read (a bad checksum, cut short) is an `Error:` line,
   `cpm: skin model: ...`.
-- Only your own skin is read; a skin change (a new download) reads it again.
+- A skin change (a new download) reads it again. Other players' skins are read too, for their own models
+  ([Other players](#other-players)).
 
 A model's animated textures (regions of its skin, cape or elytra texture that step through frames, or blend from
 one frame into the next) play as in CPM, in the world and in the gesture menu's and picker's previews. The texture
@@ -316,9 +318,38 @@ written `~XX`), and a failure reads `Error: cpm: <file>: link <loader>:<path>: <
 downloads them one after the other. A link inside a linked package is refused, as in CPM; a `local:` link (CPM's
 in-game test model) and an unknown loader are errors (`unsupported link`).
 
+### Other players
+
+Other players in the world are drawn with the model stored in their Mojang skin, on any server, as CPM draws a
+skin's model (CPM's server plugin and Horizon worlds, which send models another way, are to come).
+
+- **Loading**: each player's downloaded skin file is read, and its model loaded (its links downloaded and cached
+  as yours are), off the game's thread. A player draws vanilla until their model is ready, and stays vanilla when
+  their skin holds none. A skin change loads again; a player who leaves is dropped.
+- **Drawing**: each model is posed from what the game knows of that player: the walk, head turn, sneaking,
+  sprinting, swimming and crawling, elytra flight, sleeping, riding, on fire, freezing, riptide, ladders,
+  the swing, the item in use (bow, crossbow, eating, blocking, ...), hurt and dying, health, and the light
+  where they stand. Their armour, trims, elytra, cape, held and head items and shoulder parrots are drawn as
+  yours are. What the game is not told of another player plays as off: hunger, air (Horizon does not keep
+  another player's), creative flight, falling, and gestures and custom poses (those need CPM's server or
+  Horizon worlds). As for you, the riptide swirl, stuck arrows and bee stingers, and other mods' layers are
+  not drawn on a player the model draws.
+- **Settings**: `Other players' models: On/Off` (on) and `Max other models: N` (8; 1, 2, 4, 8, 16 or 32), with
+  how many are loaded. The nearest players get the places: with every place taken, a player at least 4
+  blocks nearer than the farthest one drawn (drawn for 3 s or more) is loaded beside them, and takes that
+  place only once their model is ready, so a player whose skin holds none never costs anyone theirs.
+- **Limits** (CPM's for players who are not friends): textures at most 256 px a side (each image's own size),
+  at most 256 cubes (extruded ones counted as CPM counts them), links at most 100 KiB each and 1 MiB of model
+  data in all. A model past them draws vanilla, with one log line for that player. A link that failed to
+  download is tried again after a minute, three tries in all.
+- **Texture room**: Horizon gives a mod one 1024x1024 image. Each other player's model takes a region of it
+  beside yours; when it is full, the rest draw vanilla until room frees up.
+- Animated textures do not play on other players (CPM's default for players who are not friends), and their
+  player heads stay vanilla.
+
 ## Not supported (yet)
 
-Other players' models (and their player heads), placed player heads, modded armor, the enchantment glint in the preview, and items and parrots in the
+Other players' player heads, gestures and custom poses, models from CPM servers and Horizon worlds, placed player heads, modded armor, the enchantment glint in the preview, and items and parrots in the
 preview. Duplicated root parts (a second head, arm and so on) are drawn as
 CPM draws them: they follow their body part's pose with their own offset, draw that part's skin box and second
 layer unless hidden, take their animations and draw their cubes. Extruded parts are drawn as CPM draws them (the texture
@@ -328,10 +359,10 @@ sliced per texel, so its transparent texels leave holes).
 
 | File | What it is |
 |---|---|
-| `mixins/cpm/horizon-mixin.toml` | The bundle: sixteen modules, the HEAD hooks (and the `first_person_arm` and `player_head` injections), the `cpm-core` crate and the `[api]` package |
+| `mixins/cpm/horizon-mixin.toml` | The bundle: seventeen modules, the HEAD hooks (and the `first_person_arm` and `player_head` injections), the `cpm-core` crate and the `[api]` package |
 | `mixins/cpm/api/` | A trait-mod package that overrides nothing. It puts CPM in the game's mod list, which the game needs before it reserves the `horizon/modimage` sprite the model's texture goes in |
 | `mixins/cpm/runtime.rs` | State and logic, added to the game as `game::cpm_mod`; also this crate's library, for its tests |
-| `mixins/cpm/*.rs` | One small helper per hook (frame, listened, player_submit, first_person_arm, player_head, mods list, settings, click, key, and CPM's mod screen's screen_render, screen_click, screen_release, screen_drag, screen_scroll, screen_key, screen_char); `draw.rs` (`game::cpm_draw`) draws quads for player_submit and first_person_arm, and a player head's quads; `player_head.rs`, at the head of the game's player-head item renderer, places the skull's head part and asks `skull_hook.rs` (`item_render::cpm_skull_hook`, in the client library) for that drawing; `head_probe.rs` (`game::cpm_head_probe`) reads your identities and a head's profile; `pose_probe.rs` (`game::cpm_pose_probe`), `action_probe.rs` (`game::cpm_action_probe`), `equipment_probe.rs` (`game::cpm_equipment_probe`), `cape_probe.rs` (`game::cpm_cape_probe`) `item_probe.rs` (`game::cpm_item_probe`) and `parrot_probe.rs` (`game::cpm_parrot_probe`) read the local player's state, its actions, what it wears, its cape, what it holds and its shoulder parrots for player_submit (`item_probe.rs` also draws the held and head items, `parrot_probe.rs` the parrots); `skin_probe.rs` (`game::cpm_skin_probe`) reads the local player's downloaded skin file for the model stored in it; `convert.rs` (`game::cpm_convert`) runs the file picker and the `.cpmproject` conversion on its own thread; `gist_fetch.rs` (`game::cpm_gist_fetch`) downloads a model's links (gists and CPM's other loaders) on its own thread; `screen.rs` (`game::cpm_screen`) routes those screen hooks to the CPM screen shown: `gist_screen.rs` (`game::cpm_gist`), the gist popup for a model too big to send directly, or `gesture_screen.rs` (`game::cpm_menu`), the gesture menu |
+| `mixins/cpm/*.rs` | One small helper per hook (frame, listened, player_submit, first_person_arm, player_head, mods list, settings, click, key, and CPM's mod screen's screen_render, screen_click, screen_release, screen_drag, screen_scroll, screen_key, screen_char); `draw.rs` (`game::cpm_draw`) draws quads for player_submit and first_person_arm, and a player head's quads; `player_head.rs`, at the head of the game's player-head item renderer, places the skull's head part and asks `skull_hook.rs` (`item_render::cpm_skull_hook`, in the client library) for that drawing; `head_probe.rs` (`game::cpm_head_probe`) reads your identities and a head's profile; `pose_probe.rs` (`game::cpm_pose_probe`), `action_probe.rs` (`game::cpm_action_probe`), `equipment_probe.rs` (`game::cpm_equipment_probe`), `cape_probe.rs` (`game::cpm_cape_probe`) `item_probe.rs` (`game::cpm_item_probe`) and `parrot_probe.rs` (`game::cpm_parrot_probe`) read the local player's state, its actions, what it wears, its cape, what it holds and its shoulder parrots for player_submit (`item_probe.rs` also draws the held and head items, `parrot_probe.rs` the parrots); `others_probe.rs` (`game::cpm_others_probe`) reads another player's state, stacks, cape and parrots and draws them with their model; `skin_probe.rs` (`game::cpm_skin_probe`) reads the downloaded skin files of the local player and the other players (nearest first) for the models stored in them; `convert.rs` (`game::cpm_convert`) runs the file picker and the `.cpmproject` conversion on its own thread; `gist_fetch.rs` (`game::cpm_gist_fetch`) downloads a model's links (gists and CPM's other loaders) on its own thread; `screen.rs` (`game::cpm_screen`) routes those screen hooks to the CPM screen shown: `gist_screen.rs` (`game::cpm_gist`), the gist popup for a model too big to send directly, or `gesture_screen.rs` (`game::cpm_menu`), the gesture menu |
 | `mixins/cpm/cpm-core/` | The `.cpmmodel` reader, model, animation engine and posing, free of the game |
 
 ```sh
@@ -339,7 +370,7 @@ sliced per texel, so its transparent texels leave holes).
 (cd native/cpm/mixins/cpm/cpm-core && cargo test)   # the reader and engine
 python native/tools/native.py check cpm        # apply on the tested Horizon and cargo check the game
                                                # (with the generated game executable the [api] package needs)
-python native/tools/native.py package cpm      # native/target/cpm-0.1.5.hnmod
+python native/tools/native.py package cpm      # native/target/cpm-0.2.0.hnmod
 ```
 
 `cargo test` inside `cpm-core` leaves a `Cargo.lock` and a `target/` there. Delete both before `check`:

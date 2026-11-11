@@ -16,12 +16,28 @@
 
 /// The local player's worn armour and elytra; nothing outside a world.
 pub(super) fn worn(game: &crate::game::Game<'_>) -> crate::game::cpm_mod::Worn {
+    if game.player.is_none() {
+        return crate::game::cpm_mod::Worn::default();
+    }
+    let cape = game.player_model.as_ref().and_then(|m| m.cape.as_deref());
+    let mut worn = worn_of(game, game.armor.each_ref().map(Option::as_ref), cape);
+    // The cape layer's texture and the chest item's layers (cape_probe.rs).
+    worn.cape_sprite = crate::game::cpm_cape_probe::sprite(game);
+    (worn.chest_has_wings, worn.chest_humanoid) = crate::game::cpm_cape_probe::chest_layers(game);
+    worn
+}
+
+/// The armour and elytra of the worn stacks `armor` (head to feet) on a player whose cape is
+/// `cape` (its texture, which an elytra takes): the local player's ([`worn`]) or another
+/// player's (others_probe.rs). The cape layer's fields are left for the caller.
+pub(super) fn worn_of(
+    game: &crate::game::Game<'_>,
+    armor: [Option<&horizon_client::items::ItemStack>; 4],
+    cape: Option<&str>,
+) -> crate::game::cpm_mod::Worn {
     use crate::game::cpm_mod as cpm;
     use horizon_client::cit::Kind;
     let mut worn = cpm::Worn::default();
-    if game.player.is_none() {
-        return worn;
-    }
     let sprites = &game.gui.atlas.sprites;
     let assets = &game.armor_stand_assets;
     // `ItemStack.hasFoil` with the item's default glint (game/item_draw.rs `has_foil`).
@@ -33,7 +49,7 @@ pub(super) fn worn(game: &crate::game::Game<'_>) -> crate::game::cpm_mod::Worn {
     // A texture's emissive overlay, when the atlas has it.
     let glow = |texture: &str| emissive.overlay(texture).filter(|e| sprites.contains_key(*e)).map(str::to_owned);
     for (i, slot) in cpm::ARMOR_SLOTS.into_iter().enumerate() {
-        let Some(stack) = game.armor[i].as_ref() else {
+        let Some(stack) = armor[i] else {
             continue;
         };
         let Some(asset) = cpm::armor_asset(&stack.item, slot) else {
@@ -65,10 +81,9 @@ pub(super) fn worn(game: &crate::game::Game<'_>) -> crate::game::cpm_mod::Worn {
         let trim = trim.map(|t| t.sprite()).filter(|s| sprites.contains_key(s));
         worn.armor[i] = cpm::piece_layers(layers, trim, foil(stack));
     }
-    if let Some(stack) = game.armor[1].as_ref().filter(|s| cpm::is_elytra(&s.item)) {
+    if let Some(stack) = armor[1].filter(|s| cpm::is_elytra(&s.item)) {
         worn.elytra = true;
         let rule = game.cit_worn_rule(Kind::Elytra, stack);
-        let cape = game.player_model.as_ref().and_then(|m| m.cape.as_deref());
         let known = |s: &str| sprites.contains_key(s).then(|| s.to_owned());
         worn.elytra_sprite =
             horizon_client::cit_armor::wings(rule, cape, &known).or_else(|| known(cpm::ELYTRA_SPRITE));
@@ -78,8 +93,5 @@ pub(super) fn worn(game: &crate::game::Game<'_>) -> crate::game::cpm_mod::Worn {
             worn.elytra_emissive = glow(cpm::ELYTRA_SPRITE);
         }
     }
-    // The cape layer's texture and the chest item's layers (cape_probe.rs).
-    worn.cape_sprite = crate::game::cpm_cape_probe::sprite(game);
-    (worn.chest_has_wings, worn.chest_humanoid) = crate::game::cpm_cape_probe::chest_layers(game);
     worn
 }

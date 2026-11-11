@@ -183,6 +183,16 @@ pub fn load_resolved(bytes: &[u8], fetch: &dyn Fn(&str) -> Result<Vec<u8>>) -> R
 /// Loads a model, resolving every link part through `text(link)`: the link's downloaded text
 /// (base64). A linked package holding links is refused (`Pack`).
 pub fn load_with_links(bytes: &[u8], text: &dyn Fn(&str) -> Result<Vec<u8>>) -> Result<LoadedModel> {
+    load_with_links_limited(bytes, text, &crate::mesh::Limits::LOCAL)
+}
+
+/// [`load_with_links`] within `limits` ([`LoadedModel::from_file_limited`]): checked before any
+/// texture is decoded.
+pub fn load_with_links_limited(
+    bytes: &[u8],
+    text: &dyn Fn(&str) -> Result<Vec<u8>>,
+    limits: &crate::mesh::Limits,
+) -> Result<LoadedModel> {
     let file = read_cpmmodel_resolving(bytes, &|link| decode_link_text(&text(link)?))?;
-    LoadedModel::from_file(file)
+    LoadedModel::from_file_limited(file, limits)
 }

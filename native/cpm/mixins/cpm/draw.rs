@@ -73,7 +73,8 @@ pub(super) fn quads_sorted(
     *draw = BlockEntityDraw::posed(partial, game_time, light, block, pose, lights, verts);
     let core_pose = cpm_core::glam::Mat4::from_cols_array(&pose.to_cols_array());
     let (solid, additive) = cpm::split_glow(&quads.quads, core_pose);
-    let mut sorted = cpm::Quads { quads: solid, ..quads.clone() };
+    // (Only the sprites are read from it: no items or shoulders copied.)
+    let mut sorted = cpm::Quads { quads: solid, sprites: quads.sprites.clone(), items: Vec::new(), shoulders: Vec::new() };
     cpm::back_to_front(&mut sorted.quads, core_pose);
     let start = n - 4;
     let Some(glints) = drawn_quads(game, draw, &sorted) else {
@@ -196,6 +197,8 @@ pub(crate) fn player_head(
             pos,
             uv: local.map(|[u, v]| [r.u0 + (r.u1 - r.u0) * u, r.v0 + (r.v1 - r.v0) * v]),
             foil_uv: local,
+            // No glint on the model's head, so no GUI glint UVs.
+            gui_glint_uv: None,
             normal,
             color: 0xFF00_0000 | (q.tint & 0xFF_FFFF),
             foil: Foil::None,

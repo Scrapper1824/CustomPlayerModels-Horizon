@@ -271,6 +271,23 @@ pub(crate) const VANILLA_PIVOTS: [[f32; 3]; BONE_COUNT] = [
 ];
 
 impl Model {
+    /// The cube count CPM checks against `MAX_CUBE_COUNT` (`ModelDefinition.validate`): every
+    /// cube, plus `BoxRender.getExtrudeSize` for each extruded one (`ceil(w * ts) * ceil(h * ts)
+    /// * 3 / 4`, its size and texture scale).
+    pub fn cube_count(&self) -> usize {
+        self.cubes
+            .iter()
+            .map(|c| {
+                if !c.extrude {
+                    return 1;
+                }
+                let ts = c.tex_scale as f64;
+                let d = |v: f32| (v as f64 * ts).ceil().max(0.0).min(u32::MAX as f64) as usize;
+                1usize.saturating_add(d(c.size[0]).saturating_mul(d(c.size[1])).saturating_mul(3) / 4)
+            })
+            .fold(0usize, usize::saturating_add)
+    }
+
     pub fn build(raw: RawModel) -> Result<Model> {
         // Vanilla pivots are identical for slim and default.
         let mut bones = [Bone { pivot: [0.0; 3], rotation: [0.0; 3] }; BONE_COUNT];

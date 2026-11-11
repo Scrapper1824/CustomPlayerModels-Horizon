@@ -1,5 +1,6 @@
 // CPM's settings page: the model, the models folder, the converter (its button, the gist limit and
-// the last result), `Gestures…` and the last error.
+// the last result), `Gestures…`, the other players' models (on or off, how many, how many draw)
+// and the last error.
 fn cpm_page(game: &mut crate::game::Game<'_>, mod_id: &str, buttons: &mut Vec<String>) {
     use crate::game::cpm_mod as cpm;
     if mod_id != cpm::ID {
@@ -23,5 +24,7 @@ fn cpm_page(game: &mut crate::game::Game<'_>, mod_id: &str, buttons: &mut Vec<St
         limit_kib: cpm::gist_limit(game.native_setting(cpm::ID, cpm::GIST_LIMIT_SETTING)),
         old_conversion: cpm::old_conversion(),
     };
-    buttons.extend(cpm::settings_labels(selected.as_deref(), error.as_deref(), &convert));
+    // The other players' models: their two settings and how many draw.
+    cpm::restore_others_settings(|key| game.native_setting(cpm::ID, key));
+    buttons.extend(cpm::settings_page(selected.as_deref(), error.as_deref(), &convert, &cpm::others_view()));
 }

@@ -21,6 +21,8 @@ fn cpm_frame(game: &mut crate::game::Game<'_>) {
     horizon_client::item_render::cpm_skull_hook::set(crate::game::cpm_draw::player_head);
     crate::game::cpm_head_probe::update(game);
     if !game.native_on(cpm::ID) {
+        // The other players' models go (vanilla) until the mod is on again.
+        cpm::others_clear();
         return;
     }
     // The model chosen on the settings page (kept as the `model` setting), once.
@@ -33,6 +35,10 @@ fn cpm_frame(game: &mut crate::game::Game<'_>) {
     // The skin's model (drawn when nothing is chosen): read again when the skin changes.
     crate::game::cpm_skin_probe::update(game);
     cpm::ensure_loaded();
+    // The other players' models, from their skins (read and loaded on threads of their own):
+    // the two settings once, then who is in the world.
+    cpm::restore_others_settings(|key| game.native_setting(cpm::ID, key));
+    cpm::others_tick(&crate::game::cpm_skin_probe::others(game), &crate::game::cpm_skin_probe::READER);
     // A model that just loaded gets its kept parameters; later changes are kept as they happen.
     cpm::restore_params(|key| game.native_setting(cpm::ID, key));
     if let Some((key, value)) = cpm::take_params_to_save() {
@@ -45,6 +51,6 @@ fn cpm_frame(game: &mut crate::game::Game<'_>) {
     if let Some((width, height, rgba)) = cpm::texture_upload(std::time::Instant::now())
         && !game.native_mod_image(width, height, &rgba)
     {
-        cpm::refuse(format!("cpm: {}: the game refused the {width}x{height} texture", cpm::selected_name()));
+        cpm::refuse_upload(width, height);
     }
 }

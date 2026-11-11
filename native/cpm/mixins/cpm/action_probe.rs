@@ -77,7 +77,7 @@ pub(super) fn state(
 /// item CPM has no pose for. A blocking item is checked before the `consumable` component, as
 /// Horizon's `tick_used_item` treats it (it blocks); vanilla checks `consumable` first, so a
 /// data-driven stack with both reads as BLOCK here and EAT in Java.
-fn use_kind(game: &crate::game::Game<'_>, stack: &ItemStack) -> Option<cpm_core::UseKind> {
+pub(super) fn use_kind(game: &crate::game::Game<'_>, stack: &ItemStack) -> Option<cpm_core::UseKind> {
     use cpm_core::UseKind;
     let mut animation = if game.blocks_attacks(stack).is_some() {
         UseAnimation::Block
@@ -125,10 +125,16 @@ fn on_climbable(game: &crate::game::Game<'_>, at: [i32; 3]) -> bool {
     if p.spectator || p.flying {
         return false;
     }
+    climbable_at(game, at, p.fall_flying)
+}
+
+/// The block part of [`on_climbable`] at `at`, for any player (`fall_flying`: gliding with an
+/// elytra): another player's too (others_probe.rs).
+pub(super) fn climbable_at(game: &crate::game::Game<'_>, at: [i32; 3], fall_flying: bool) -> bool {
     let state = game.world.block(at[0], at[1], at[2]);
     let name = &game.res.facts().get(state).name;
     if game.block_in_tag("minecraft:climbable", name) {
-        return !(p.fall_flying && game.block_in_tag("minecraft:can_glide_through", name));
+        return !(fall_flying && game.block_in_tag("minecraft:can_glide_through", name));
     }
     let property = |s, key: &str| {
         game.pack.assets.registry.state(s).and_then(|s| s.properties.get(key)).map(|v| v.to_string())

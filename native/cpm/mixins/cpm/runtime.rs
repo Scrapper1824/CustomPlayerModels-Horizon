@@ -455,14 +455,20 @@ fn fetches<R>(f: impl FnOnce(&mut Fetches) -> R) -> R {
 /// download (`cpm_core::link::link_urls`). An earlier failure not yet taken is dropped: this is a
 /// new try.
 pub fn start_fetch(link: &str) -> bool {
+    start_fetch_as(link, link)
+}
+
+/// [`start_fetch`] of `link` under the key `key`, which the download is known by from then on
+/// (requests, [`finish_fetch`], results): the other players' downloads have keys of their own.
+fn start_fetch_as(key: &str, link: &str) -> bool {
     let Ok(urls) = cpm_core::link::link_urls(link) else { return false };
     fetches(|f| {
-        if f.in_flight.iter().any(|l| l == link) || f.done.iter().any(|(l, r)| l == link && r.is_ok()) {
+        if f.in_flight.iter().any(|l| l == key) || f.done.iter().any(|(l, r)| l == key && r.is_ok()) {
             return false;
         }
-        f.done.retain(|(l, _)| l != link);
-        f.in_flight.push(link.to_owned());
-        f.requests.push((link.to_owned(), urls));
+        f.done.retain(|(l, _)| l != key);
+        f.in_flight.push(key.to_owned());
+        f.requests.push((key.to_owned(), urls));
         true
     })
 }
@@ -505,6 +511,18 @@ fn fail(s: &mut State, error: String) {
 /// The game would not take the texture: logs `error` and drops the model until the selection changes.
 pub fn refuse(error: String) {
     STATE.with_borrow_mut(|s| fail(s, error));
+}
+
+/// The game would not take the `width`x`height` image [`texture_upload`] gave: no other player's
+/// model draws from it, and the local model (when there is one) is refused as [`refuse`] does;
+/// without one, it is only logged.
+pub fn refuse_upload(width: u32, height: u32) {
+    set_others_shown(Vec::new());
+    if has_model() {
+        refuse(format!("cpm: {}: the game refused the {width}x{height} texture", selected_name()));
+    } else {
+        log::warn!("cpm: the game refused the {width}x{height} texture of other players' models");
+    }
 }
 
 /// A model is drawn only with its own texture (no player-skin fallback yet):
@@ -619,6 +637,8 @@ struct Composed {
     layout: SlotLayout,
     /// Per picker file, where its icon is (`None`: no icon, or no room: a name tile).
     icons: Vec<Option<[u32; 2]>>,
+    /// The other players' models placed in it ([`place_others`]): UUID, region's top left.
+    others: Vec<(u128, [u32; 2])>,
 }
 
 /// The image changed (the picker opened or closed, its preview or icons came): make it again and
@@ -637,9 +657,11 @@ fn recompose(s: &mut State) {
 /// when its contents change; once the picker closes the image is the selected model's alone again
 /// (the picker's parts left in the sprite past it are never sampled).
 pub fn texture_upload(now: Instant) -> Option<(u32, u32, Vec<u8>)> {
+    let others = OTHERS.with_borrow(|o| o.entries.iter().any(|e| matches!(e.load, OtherLoad::Ready(_))));
     STATE.with_borrow_mut(|s| {
-        if s.model.is_none() && s.picker.is_none() {
+        if s.model.is_none() && s.picker.is_none() && !others {
             s.composed = None;
+            set_others_shown(Vec::new());
             return None;
         }
         if s.model.is_some() && s.uploaded.is_none() {
@@ -661,6 +683,8 @@ pub fn texture_upload(now: Instant) -> Option<(u32, u32, Vec<u8>)> {
             s.uploaded = Some(now);
         }
         let c = s.composed.as_ref()?;
+        // What the game holds from now on: the other players' models draw from their regions.
+        set_others_shown(c.others.clone());
         // Nothing placed yet (the picker open with no model, its reads not back): nothing to send.
         if c.size[0] == 0 || c.size[1] == 0 {
             return None;
@@ -670,7 +694,8 @@ pub fn texture_upload(now: Instant) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 /// Makes the image: the selected model's part (`None`, the model refused, when it is too big),
-/// then the picker's.
+/// then the picker's, then the other players' models where [`place_others`] puts them (around
+/// the parts before: the local player and the picker come first).
 fn compose(s: &mut State) -> Option<Composed> {
     let mut active = [0, 0];
     if let Some(model) = s.model.as_ref() {
@@ -708,8 +733,18 @@ fn compose(s: &mut State) -> Option<Composed> {
     if let (Some(at), Some(m)) = (layout.preview_at, preview) {
         grow(at, model_composite(m).size);
     }
+    let mut taken = vec![[0, 0, active[0], active[1]]];
+    if let (Some(at), Some(m)) = (layout.preview_at, preview) {
+        let [pw, ph] = model_composite(m).size;
+        taken.push([at[0], at[1], pw, ph]);
+    }
     for at in layout.icon_at.iter().flatten() {
         grow(*at, [ICON_PX, ICON_PX]);
+        taken.push([at[0], at[1], ICON_PX, ICON_PX]);
+    }
+    let others = OTHERS.with_borrow_mut(|o| place_others(o, &taken));
+    for (at, px) in others.iter().map(|(_, at, px)| (*at, *px)) {
+        grow(at, px);
     }
     let w = size[0];
     let mut rgba = vec![0u8; (size[0] * size[1] * 4) as usize];
@@ -728,7 +763,15 @@ fn compose(s: &mut State) -> Option<Composed> {
             }
         }
     }
-    Some(Composed { size, rgba, layout, icons: placed })
+    OTHERS.with_borrow(|o| {
+        for (uuid, at, _) in &others {
+            if let Some(OtherLoad::Ready(m)) = o.entries.iter().find(|e| e.uuid == *uuid).map(|e| &e.load) {
+                put_model(&mut rgba, w, m, *at);
+            }
+        }
+    });
+    let others = others.into_iter().map(|(uuid, at, _)| (uuid, at)).collect();
+    Some(Composed { size, rgba, layout, icons: placed, others })
 }
 
 /// Puts `model`'s part of the image ([`composite`]) into `rgba` (`w` pixels wide) at `base`.
@@ -1221,14 +1264,20 @@ impl Pass {
 /// model's sheet (and the vanilla cape) the player's cape. A box with nothing to sample (a slot
 /// with no layers, a cape with no texture) is left out.
 pub fn box_quads(model: &LoadedModel, boxes: &[PosedBox], worn: &Worn) -> Quads {
+    box_quads_at(model, boxes, worn, [0, 0])
+}
+
+/// [`box_quads`] for a model whose image ([`composite`]) is at `base` in [`SPRITE`] (the local
+/// player's at the top left, another player's at its region: [`with_other_model`]).
+pub fn box_quads_at(model: &LoadedModel, boxes: &[PosedBox], worn: &Worn, base: [u32; 2]) -> Quads {
     let mut out = Quads::new();
     let mut passes = Vec::new();
     for b in boxes {
-        box_passes(model, b, worn, [0, 0], &mut out, &mut passes);
+        box_passes(model, b, worn, base, &mut out, &mut passes);
         for &pass in &passes {
             for face in b.faces.iter().flatten() {
                 let corners = face.corners.map(|c| b.transform.transform_point3(c.into()).to_array());
-                let (uv, sprite, tint) = pass.map(model, b, face, [0, 0]);
+                let (uv, sprite, tint) = pass.map(model, b, face, base);
                 // The glint scrolls by the face's place in its own texture. None on a glowing box
                 // (CPM's RenderMode.GLOW draws in its own render type, never the glint's).
                 let glint = (pass.glint && !b.glow).then(|| own_uv(face.uv, b.texture_px).map(|t| t / 16.0));
@@ -1322,6 +1371,20 @@ pub fn quads(input: &PoseInput, worn: &Worn) -> Option<Quads> {
     posed_quads(worn, |m| {
         let input = PoseInput { equipment: worn.equipment(elytra_sheet(m).is_some()), ..*input };
         m.pose_with_items(&input)
+    })
+}
+
+/// Another player's model (`uuid`'s, [`with_other_model`]) posed for `input` wearing `worn`, as
+/// [`quads`] does the local player's, sampling its own region of [`SPRITE`]; `None` when it does
+/// not draw (the player draws vanilla).
+pub fn other_quads(uuid: u128, input: &PoseInput, worn: &Worn) -> Option<Quads> {
+    with_other_model(uuid, |m, base| {
+        let input = PoseInput { equipment: worn.equipment(elytra_sheet(m).is_some()), ..*input };
+        let posed = m.pose_with_items(&input);
+        let mut quads = box_quads_at(m, &posed.boxes, worn, base);
+        quads.items = item_draws(&posed.items, worn.skull);
+        quads.shoulders = parrot_draws(&posed.shoulders);
+        quads
     })
 }
 
@@ -1481,6 +1544,113 @@ pub fn action_input(s: &ActionState, input: &mut PoseInput) {
     input.light = Some(s.light[0].max(s.light[1]) as f32 / 15.0);
     input.hurt = s.hurt_time > 0;
     input.dying = s.dead;
+}
+
+// ---- Other players' pose input: others_probe.rs reads what the game knows of another player,
+// player_submit.rs maps it here.
+
+/// What the game knows of another player (a server sends it, or Horizon animates it), in plain
+/// values: the render state, the synced flags, health, the swing and the item in use. What a
+/// client is not told of another player (hunger, creative flight, the fall distance, gestures) is
+/// not here and reads as off (as CPM reads a `RemotePlayer` without its server).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RemoteState {
+    pub time_ms: u64,
+    /// The render state (`NativeMobRender`).
+    pub walk_position: f32,
+    pub walk_speed: f32,
+    pub head_yaw: f32,
+    pub pitch: f32,
+    pub age: f32,
+    pub on_ground: bool,
+    pub hurt_time: i32,
+    /// `!isAlive()`.
+    pub dead: bool,
+    /// Health over max health (synced), when known.
+    pub health: Option<f32>,
+    /// The shared flags and the synced pose.
+    pub crouching: bool,
+    pub sprinting: bool,
+    /// `isVisuallySwimming`: the swimming pose, or the fall-flying pose without flight.
+    pub visually_swimming: bool,
+    pub fall_flying: bool,
+    pub sleeping: bool,
+    pub riding: bool,
+    pub on_fire: bool,
+    /// Riptide (`isAutoSpinAttack`).
+    pub spin_attack: bool,
+    /// Water at its feet.
+    pub in_water: bool,
+    pub ticks_frozen: i32,
+    /// `getAirSupply`, of 300 ticks.
+    pub air: i32,
+    /// On a ladder or vine at its feet, and this tick's vertical movement.
+    pub on_climbable: bool,
+    pub dy: f64,
+    /// Its main arm is the left.
+    pub left_handed: bool,
+    /// The swing's hand and animation, `swinging` while one is under way.
+    pub swing: Option<(cpm_core::Hand, f32)>,
+    pub swinging: bool,
+    pub using: Option<Use>,
+    pub holding: [bool; 2],
+    pub charged: [bool; 2],
+    /// Block and sky light at its block, when known.
+    pub light: Option<[u8; 2]>,
+    /// The cape layer's motion (none for a spectator), invisible, the shoulder parrots.
+    pub cape: Option<cpm_core::CapeState>,
+    pub invisible: bool,
+    pub parrots: [bool; 2],
+}
+
+/// Another player's pose input from `s`, as [`action_input`] fills the local player's: the same
+/// action, hurt and dying values, the unknowns off (no hunger frame, no creative flight, never
+/// falling), no equipment (set from what is worn, as for the local player).
+pub fn remote_input(s: &RemoteState) -> PoseInput {
+    let mut input = PoseInput {
+        time_ms: s.time_ms,
+        walk_position: s.walk_position,
+        walk_speed: s.walk_speed,
+        head_yaw: s.head_yaw,
+        pitch: s.pitch,
+        age: s.age,
+        on_ground: s.on_ground,
+        sneaking: s.crouching,
+        sprinting: s.sprinting,
+        swimming: s.visually_swimming,
+        fall_flying: s.fall_flying,
+        sleeping: s.sleeping,
+        riding: s.riding,
+        on_fire: s.on_fire,
+        air: Some(s.air.clamp(0, 300) as f32 / 300.0),
+        left_handed: s.left_handed,
+        cape: s.cape,
+        invisible: s.invisible,
+        parrot_left: s.parrots[0],
+        parrot_right: s.parrots[1],
+        ..Default::default()
+    };
+    let action = ActionState {
+        swing: s.swing,
+        swinging: s.swinging,
+        using: s.using,
+        holding: s.holding,
+        charged: s.charged,
+        on_climbable: s.on_climbable,
+        dy: s.dy,
+        visually_swimming: s.visually_swimming,
+        in_water: s.in_water,
+        spin_attack: s.spin_attack,
+        ticks_frozen: s.ticks_frozen,
+        hurt_time: s.hurt_time,
+        dead: s.dead,
+        ..Default::default()
+    };
+    action_input(&action, &mut input);
+    input.health = s.health;
+    input.hunger = None;
+    input.light = s.light.map(|[block, sky]| block.max(sky) as f32 / 15.0);
+    input
 }
 
 /// The models folder, `<game dir>/player_models`, from the mod's data folder
@@ -2451,6 +2621,8 @@ pub struct Tile {
 enum JobOutcome {
     Tiles(Vec<TileScan>),
     Preview(Result<Box<PreviewModel>, String>),
+    /// Another player's model ([`load_other`]).
+    Other(OtherOutcome),
 }
 
 struct PickerJobs {
@@ -2475,6 +2647,11 @@ fn next_job() -> u64 {
 
 /// Runs `work` on a thread of its own as job `job`; a panic (or no thread) ends it with `failed`.
 fn spawn_job(job: u64, work: impl FnOnce() -> JobOutcome + Send + 'static, failed: fn() -> JobOutcome) {
+    spawn_named_job("picker", job, work, failed)
+}
+
+/// [`spawn_job`] on a thread named `cpm-<what>`, its crash logged as `what`'s.
+fn spawn_named_job(what: &'static str, job: u64, work: impl FnOnce() -> JobOutcome + Send + 'static, failed: fn() -> JobOutcome) {
     let finish = move |outcome: JobOutcome| {
         picker_jobs(|j| {
             if let Some(at) = j.dropped.iter().position(|d| *d == job) {
@@ -2486,13 +2663,13 @@ fn spawn_job(job: u64, work: impl FnOnce() -> JobOutcome + Send + 'static, faile
     };
     let run = move || {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| {
-            log::warn!("cpm: reading a model for the picker crashed");
+            log::warn!("cpm: reading a model for the {what} crashed");
             failed()
         });
         finish(outcome);
     };
-    if let Err(e) = std::thread::Builder::new().name("cpm-picker".into()).spawn(run) {
-        log::warn!("cpm: cannot start the picker's reader: {e}");
+    if let Err(e) = std::thread::Builder::new().name(format!("cpm-{what}")).spawn(run) {
+        log::warn!("cpm: cannot start the {what}'s reader: {e}");
         picker_jobs(|j| j.done.push((job, failed())));
     }
 }
@@ -2850,6 +3027,42 @@ pub fn settings_labels(
     labels
 }
 
+/// What the settings page shows of the other players' models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OthersView {
+    /// The `others` setting ([`others_on`]).
+    pub on: bool,
+    /// The `max_others` setting ([`max_others`]).
+    pub max: usize,
+    /// Drawn with their models now ([`others_loaded`]).
+    pub loaded: usize,
+    /// Loaded, but with no room left in [`SPRITE`]: drawn vanilla.
+    pub no_room: usize,
+}
+
+/// The whole settings page: [`settings_labels`] with `Other players' models: On/Off` (button 5)
+/// and `Max other models: N` (button 6) after `Gestures…`, then (while on) how many other
+/// players' models are drawn, before the information lines.
+pub fn settings_page(
+    selected: Option<&Path>,
+    error: Option<&str>,
+    convert: &ConvertView<'_>,
+    others: &OthersView,
+) -> Vec<String> {
+    let mut labels = settings_labels(selected, error, convert);
+    let mut own = vec![
+        format!("Other players' models: {}", if others.on { "On" } else { "Off" }),
+        format!("Max other models: {}", others.max),
+    ];
+    if others.on {
+        let room = if others.no_room > 0 { format!(" ({} without room)", others.no_room) } else { String::new() };
+        own.push(format!("Other players' models loaded: {}{room}", others.loaded));
+    }
+    let at = labels.len().min(5);
+    labels.splice(at..at, own);
+    labels
+}
+
 /// What a click on the settings page does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Click {
@@ -2862,6 +3075,10 @@ pub enum Click {
     GistLimit,
     /// Open the gesture menu ([`request_menu`]).
     Gestures,
+    /// Turn the other players' models on or off ([`set_others_on`]) and keep it.
+    OthersToggle,
+    /// Store the next most other players' models drawn ([`next_max_others`]).
+    MaxOthers,
     Nothing,
 }
 
@@ -2879,6 +3096,8 @@ pub fn click(button: usize, models: &[PathBuf], selected: Option<&Path>) -> Clic
         2 => Click::Convert,
         3 => Click::GistLimit,
         4 => Click::Gestures,
+        5 => Click::OthersToggle,
+        6 => Click::MaxOthers,
         _ => Click::Nothing,
     }
 }
@@ -3443,4 +3662,776 @@ pub fn picker_outcome(stdout: &[u8], success: bool, stderr: &[u8], windows: bool
         }
     }
     Ok(None)
+}
+
+// ---- Other players' models (multiplayer phase 1): the model stored in each one's skin. A
+// registry by UUID of its own (`OTHERS`), apart from the local player's `State`: each player has
+// a model of their own, with its own animation engine and textures, never the local one's. The
+// skin files are read and the models loaded on threads of their own (picker jobs); links resolve
+// from the link cache, else download through the gist fetcher under keys of their own
+// ([`OTHER_FETCH`]). skin_probe.rs lists the players; the frame hook calls [`others_tick`]. ----
+
+/// The setting that turns the other players' models on or off ([`others_on`]).
+pub const OTHERS_SETTING: &str = "others";
+/// The setting that keeps how many other players' models load at most ([`max_others`]).
+pub const MAX_OTHERS_SETTING: &str = "max_others";
+pub const DEFAULT_MAX_OTHERS: usize = 8;
+/// The `Max other models` button's values, in turn.
+const MAX_OTHERS_CHOICES: [usize; 6] = [1, 2, 4, 8, 16, 32];
+/// The most text one of another player's links may have (`ConfigKeys.MAX_LINK_SIZE`, its default
+/// for players who are not friends: 100 KB), enforced while downloading ([`fetch_limit`]) and on
+/// cached texts. The local player's own links keep the gist fetcher's 16 MiB.
+pub const OTHER_MAX_LINK_BYTES: usize = 100 * 1024;
+/// The most model data another player's model may have: its skin data and the texts of all its
+/// links together.
+pub const OTHER_MAX_MODEL_BYTES: usize = 1024 * 1024;
+/// The local player's link downloads: the most text taken.
+const LOCAL_MAX_LINK_BYTES: u64 = 16 * 1024 * 1024;
+/// CPM's limits for other players' models (`ModelDefinition.validate`, `TextureProvider`).
+const OTHER_LIMITS: cpm_core::Limits = cpm_core::Limits { max_texture_px: OTHER_MAX_TEXTURE_PX, max_cubes: OTHER_MAX_CUBES };
+/// The largest texture sheet side of another player's model (`ConfigKeys.MAX_TEX_SHEET_SIZE`, its
+/// default for players who are not friends).
+pub const OTHER_MAX_TEXTURE_PX: u32 = 256;
+/// The most cubes another player's model may have (`ConfigKeys.MAX_CUBE_COUNT`, its default for
+/// players who are not friends; extruded cubes count as `BoxRender.getExtrudeSize` says).
+pub const OTHER_MAX_CUBES: usize = 256;
+/// The prefix of an other player's link download (its [`start_fetch_as`] key): the local player's
+/// downloads and theirs never take each other's results.
+const OTHER_FETCH: &str = "others|";
+
+/// The stored `others` setting: on unless `off` (on by default).
+pub fn others_on(setting: Option<String>) -> bool {
+    !matches!(setting.as_deref().map(str::trim), Some("off" | "false" | "0"))
+}
+
+/// The `others` setting's value for `on`.
+pub fn others_setting(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// The stored `max_others` setting: [`DEFAULT_MAX_OTHERS`] when unset or not a number, else
+/// clamped to 1..=32.
+pub fn max_others(setting: Option<String>) -> usize {
+    setting.and_then(|s| s.trim().parse::<u64>().ok()).map_or(DEFAULT_MAX_OTHERS, |n| n.clamp(1, 32) as usize)
+}
+
+/// The `Max other models` button's next value: 1, 2, 4, 8, 16, 32, then 1 again.
+pub fn next_max_others(n: usize) -> usize {
+    MAX_OTHERS_CHOICES.iter().copied().find(|c| *c > n).unwrap_or(MAX_OTHERS_CHOICES[0])
+}
+
+/// Another player's downloaded skin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtherSkin {
+    /// Its texture id (`skins/<digest>`): a new one is a new skin.
+    pub location: String,
+    /// `PlayerSkin.model` is slim: the slim channel is read first.
+    pub slim: bool,
+}
+
+/// A player in the world other than the local one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OtherPlayer {
+    pub uuid: u128,
+    /// Their downloaded skin; `None`: none yet, or a default one (no model).
+    pub skin: Option<OtherSkin>,
+    /// How far they are from the camera, in blocks (the cap keeps the nearest).
+    pub distance: f32,
+}
+
+/// How much nearer (blocks) a player must be than the farthest one drawn to take their place.
+pub const OTHER_SWAP_MARGIN: f32 = 4.0;
+
+/// How long a model that loaded keeps its place before a nearer player may take it.
+pub const OTHER_MIN_HOLD: Duration = Duration::from_secs(3);
+
+/// How a skin is read (skin_probe.rs): the file of a skin's location, and the skin as the game
+/// draws it (size, RGBA8) from its PNG. Called on the loading threads.
+#[derive(Clone, Copy)]
+pub struct SkinReader {
+    pub file: fn(&str) -> PathBuf,
+    pub texture: fn(&[u8]) -> Option<([u32; 2], Vec<u8>)>,
+}
+
+/// Where another player's model is. Only the tests ask (the draw path asks [`with_other_model`]).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OtherStatus {
+    /// Being read or loaded, or waiting for a link's download.
+    Pending,
+    Loaded,
+    /// The skin holds no model.
+    None,
+    /// Not drawn, and why (logged once).
+    Error(String),
+}
+
+/// What a loading thread ended with.
+enum OtherOutcome {
+    Ready(Box<LoadedModel>),
+    Empty,
+    /// A link neither downloaded nor cached: download it, then load again with the texts so far.
+    Link { link: String, got: Vec<(String, Vec<u8>)> },
+    Failed(String),
+}
+
+// (`Failed`'s reason: only the tests read it, [`other_status`]; it was logged.)
+#[allow(dead_code)]
+enum OtherLoad {
+    /// Loading on a thread (job [`next_job`]).
+    Loading(u64),
+    Link { link: String, got: Vec<(String, Vec<u8>)> },
+    Ready(Box<LoadedModel>),
+    Empty,
+    Failed(String),
+}
+
+struct Other {
+    uuid: u128,
+    skin: OtherSkin,
+    load: OtherLoad,
+    /// Its image's top left in [`SPRITE`], once [`place_others`] found room.
+    region: Option<[u32; 2]>,
+    /// When its model loaded (the [`OTHER_MIN_HOLD`] it keeps its place for).
+    ready_at: Option<Instant>,
+}
+
+impl Other {
+    /// It holds one of the [`max_others`] places: loading, or loaded.
+    fn holds_place(&self) -> bool {
+        matches!(self.load, OtherLoad::Loading(_) | OtherLoad::Link { .. } | OtherLoad::Ready(_))
+    }
+}
+
+struct Others {
+    /// [`restore_others_settings`] ran, or a setting was set.
+    settings_read: bool,
+    on: bool,
+    max: usize,
+    /// In the order the players came.
+    entries: Vec<Other>,
+    /// The models in the image the game holds ([`texture_upload`]): UUID, region.
+    shown: Vec<(u128, [u32; 2])>,
+    /// Loaded models with no room in the last image made.
+    no_room: usize,
+    /// The models that failed this session (the latest [`FAILED_KEPT`]): one coming back with the
+    /// same skin is not loaded (nor logged) again, unless its failure was a download's and its
+    /// retry is due ([`Failure::retry`]).
+    failed: Vec<Failure>,
+}
+
+/// A model that failed to load.
+struct Failure {
+    uuid: u128,
+    skin: OtherSkin,
+    error: String,
+    /// A failed download (a network error, a timeout, an error answer): when it is loaded again,
+    /// and how many tries have failed so far. `None` for a model's own fault (bad data, past a
+    /// limit), which is never retried while the skin stays.
+    retry: Option<(Instant, u32)>,
+}
+
+/// How long after a failed download another player's model is tried again.
+pub const OTHER_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// How many times a download is tried for another player's model before it counts as failed
+/// for the session.
+pub const OTHER_TRIES: u32 = 3;
+
+/// How many failed models [`Others::failed`] remembers.
+const FAILED_KEPT: usize = 256;
+
+impl Default for Others {
+    fn default() -> Self {
+        Others {
+            settings_read: false,
+            on: true,
+            max: DEFAULT_MAX_OTHERS,
+            entries: Vec::new(),
+            shown: Vec::new(),
+            no_room: 0,
+            failed: Vec::new(),
+        }
+    }
+}
+
+impl Others {
+    /// `uuid` with `skin` failed with `error` at `now` (logged now): a failed download
+    /// (`download`) is tried again after [`OTHER_RETRY_DELAY`], [`OTHER_TRIES`] times in all.
+    fn note_failed(&mut self, uuid: u128, skin: &OtherSkin, error: &str, download: bool, now: Instant) {
+        log::warn!("{error}");
+        let i = self.failed.iter().position(|f| f.uuid == uuid && f.skin == *skin);
+        let tries = i.and_then(|i| self.failed[i].retry).map_or(0, |(_, n)| n) + 1;
+        if let Some(i) = i {
+            self.failed.remove(i);
+        }
+        if self.failed.len() >= FAILED_KEPT {
+            self.failed.remove(0);
+        }
+        let retry = (download && tries < OTHER_TRIES).then(|| (now + OTHER_RETRY_DELAY, tries));
+        self.failed.push(Failure { uuid, skin: skin.clone(), error: error.to_owned(), retry });
+    }
+
+    /// Whether `uuid`'s model of `skin` failed and is not to be loaded at `now` (its error), or
+    /// may be loaded (`None`: it never failed, or a failed download's retry is due).
+    fn failed_now(&self, uuid: u128, skin: &OtherSkin, now: Instant) -> Option<&str> {
+        let f = self.failed.iter().find(|f| f.uuid == uuid && f.skin == *skin)?;
+        match f.retry {
+            Some((at, _)) if now >= at => None,
+            _ => Some(&f.error),
+        }
+    }
+}
+
+thread_local! {
+    static OTHERS: RefCell<Others> = RefCell::new(Others::default());
+}
+
+/// The first time it is called (on this thread): the two settings, as `get` reads them.
+pub fn restore_others_settings(get: impl Fn(&str) -> Option<String>) {
+    if OTHERS.with_borrow(|o| o.settings_read) {
+        return;
+    }
+    let (on, max) = (others_on(get(OTHERS_SETTING)), max_others(get(MAX_OTHERS_SETTING)));
+    OTHERS.with_borrow_mut(|o| {
+        o.settings_read = true;
+        o.on = on;
+        o.max = max;
+    });
+}
+
+/// Turns the other players' models on or off (off drops them at the next [`others_tick`]).
+pub fn set_others_on(on: bool) {
+    OTHERS.with_borrow_mut(|o| {
+        o.settings_read = true;
+        o.on = on;
+    });
+}
+
+/// Sets how many other players' models load at most (1..=32).
+pub fn set_max_others(max: usize) {
+    OTHERS.with_borrow_mut(|o| {
+        o.settings_read = true;
+        o.max = max.clamp(1, 32);
+    });
+}
+
+/// What the settings page shows of them.
+pub fn others_view() -> OthersView {
+    OTHERS.with_borrow(|o| OthersView { on: o.on, max: o.max, loaded: o.shown.len(), no_room: o.no_room })
+}
+
+/// How many other players' models draw: those in the image the game holds. Only the tests ask
+/// (the settings page reads [`others_view`]).
+#[allow(dead_code)]
+pub fn others_loaded() -> usize {
+    OTHERS.with_borrow(|o| o.shown.len())
+}
+
+/// Whether any other player's model draws: the draw path (player_submit, listened) asks.
+pub fn others_drawable() -> bool {
+    OTHERS.with_borrow(|o| !o.shown.is_empty())
+}
+
+/// Where `uuid`'s model is ([`OtherStatus`]); `None`: no entry (no skin, out of the world, past
+/// the [`max_others`] cap, or the setting off). Only the tests ask.
+#[allow(dead_code)]
+pub fn other_status(uuid: u128) -> Option<OtherStatus> {
+    OTHERS.with_borrow(|o| {
+        o.entries.iter().find(|e| e.uuid == uuid).map(|e| match &e.load {
+            OtherLoad::Loading(_) | OtherLoad::Link { .. } => OtherStatus::Pending,
+            OtherLoad::Ready(_) => OtherStatus::Loaded,
+            OtherLoad::Empty => OtherStatus::None,
+            OtherLoad::Failed(e) => OtherStatus::Error(e.clone()),
+        })
+    })
+}
+
+/// `uuid`'s region of [`SPRITE`] (its image's top left, laid out as [`composite`] says) when its
+/// model draws: loaded, placed, and in the image the game holds. Only the tests ask (the draw
+/// path gets it with the model: [`with_other_model`]).
+#[allow(dead_code)]
+pub fn other_region(uuid: u128) -> Option<[u32; 2]> {
+    OTHERS.with_borrow(|o| shown_region(o, uuid))
+}
+
+fn shown_region(o: &Others, uuid: u128) -> Option<[u32; 2]> {
+    let at = o.shown.iter().find(|(u, _)| *u == uuid)?.1;
+    o.entries
+        .iter()
+        .any(|e| e.uuid == uuid && e.region == Some(at) && matches!(e.load, OtherLoad::Ready(_)))
+        .then_some(at)
+}
+
+/// Whether `uuid`'s model draws (loaded and in the image the game holds): the draw path asks this
+/// first, before it reads anything of that player.
+pub fn other_shown(uuid: u128) -> bool {
+    OTHERS.with_borrow(|o| shown_region(o, uuid).is_some())
+}
+
+/// Runs `f` on `uuid`'s model and its region ([`other_region`]: the `base` of [`box_quads_at`]);
+/// `None` when it does not draw (the player draws vanilla). The draw path ([`other_quads`]) uses it.
+pub fn with_other_model<R>(uuid: u128, f: impl FnOnce(&mut LoadedModel, [u32; 2]) -> R) -> Option<R> {
+    OTHERS.with_borrow_mut(|o| {
+        let at = shown_region(o, uuid)?;
+        match &mut o.entries.iter_mut().find(|e| e.uuid == uuid)?.load {
+            OtherLoad::Ready(m) => Some(f(m, at)),
+            _ => None,
+        }
+    })
+}
+
+/// Drops every other player's model (the mod is off).
+pub fn others_clear() {
+    let changed = OTHERS.with_borrow_mut(|o| {
+        let mut changed = false;
+        for e in o.entries.drain(..) {
+            forget_other(&e, &mut changed);
+        }
+        changed
+    });
+    if changed {
+        STATE.with_borrow_mut(recompose);
+    }
+}
+
+/// Once a frame, with the players in the world other than the local one (in order of priority:
+/// skin_probe.rs gives the nearest to the camera first)
+/// and how their skins read: drops those gone or whose skin changed, takes the loads and
+/// downloads that ended, keeps the first [`max_others`] places, and starts loading the next
+/// players with a downloaded skin while there is room. Nothing while the setting is off (every
+/// model dropped). The image is made again when a model came or went.
+pub fn others_tick(players: &[OtherPlayer], reader: &SkinReader) {
+    others_tick_at(players, reader, Instant::now());
+}
+
+/// [`others_tick`] at `now` (a failed download's retry is due by it).
+pub fn others_tick_at(players: &[OtherPlayer], reader: &SkinReader, now: Instant) {
+    let (own, data_dir) = STATE.with_borrow(|s| (s.own.iter().filter_map(|i| i.id).collect::<Vec<_>>(), s.data_dir.clone()));
+    let changed = OTHERS.with_borrow_mut(|o| tick_others(o, players, reader, &own, data_dir.as_deref(), now));
+    if changed {
+        STATE.with_borrow_mut(recompose);
+    }
+}
+
+fn tick_others(
+    o: &mut Others,
+    players: &[OtherPlayer],
+    reader: &SkinReader,
+    own: &[u128],
+    data_dir: Option<&Path>,
+    now: Instant,
+) -> bool {
+    let mut changed = false;
+    let on = o.on;
+    let wanted = |e: &Other| {
+        on && !own.contains(&e.uuid) && players.iter().any(|p| p.uuid == e.uuid && p.skin.as_ref() == Some(&e.skin))
+    };
+    o.entries.retain(|e| {
+        let keep = wanted(e);
+        if !keep {
+            forget_other(e, &mut changed);
+        }
+        keep
+    });
+    // The loads that ended.
+    let mut failed = Vec::new();
+    for e in &mut o.entries {
+        let OtherLoad::Loading(job) = e.load else { continue };
+        let Some(outcome) = take_job(job) else { continue };
+        e.load = match outcome {
+            JobOutcome::Other(OtherOutcome::Ready(m)) => {
+                log::info!("cpm: {}: loaded {}", other_name(e.uuid), m.name);
+                changed = true;
+                e.ready_at = Some(now);
+                OtherLoad::Ready(m)
+            }
+            JobOutcome::Other(OtherOutcome::Empty) => OtherLoad::Empty,
+            JobOutcome::Other(OtherOutcome::Link { link, got }) => {
+                start_fetch_as(&other_fetch_key(&link), &link);
+                OtherLoad::Link { link, got }
+            }
+            JobOutcome::Other(OtherOutcome::Failed(error)) => {
+                failed.push((e.uuid, e.skin.clone(), error.clone(), false));
+                OtherLoad::Failed(error)
+            }
+            _ => OtherLoad::Failed(format!("cpm: {}: the load ended wrongly", other_name(e.uuid))),
+        };
+    }
+    // The downloads that ended: every player waiting for that link goes on with it.
+    let mut links: Vec<String> = Vec::new();
+    for e in &o.entries {
+        if let OtherLoad::Link { link, .. } = &e.load
+            && !links.contains(link)
+        {
+            links.push(link.clone());
+        }
+    }
+    for link in links {
+        let Some(result) = take_fetch_result(&other_fetch_key(&link)) else { continue };
+        for e in &mut o.entries {
+            if !matches!(&e.load, OtherLoad::Link { link: l, .. } if *l == link) {
+                continue;
+            }
+            let OtherLoad::Link { mut got, .. } = std::mem::replace(&mut e.load, OtherLoad::Empty) else { continue };
+            e.load = match &result {
+                Ok(text) => {
+                    got.push((link.clone(), text.clone()));
+                    start_other_load(e.uuid, &e.skin, got, reader, data_dir)
+                }
+                Err(reason) => {
+                    let error = gist_error(&other_name(e.uuid), &link, reason);
+                    // A download that failed is tried again later; one past the size cap is not.
+                    let download = !reason.starts_with("larger than");
+                    failed.push((e.uuid, e.skin.clone(), error.clone(), download));
+                    OtherLoad::Failed(error)
+                }
+            };
+        }
+    }
+    for (uuid, skin, error, download) in failed {
+        o.note_failed(uuid, &skin, &error, download, now);
+    }
+    // Downloads no one waits for any more (their players left): their texts go.
+    let waited: Vec<String> = o
+        .entries
+        .iter()
+        .filter_map(|e| match &e.load {
+            OtherLoad::Link { link, .. } => Some(other_fetch_key(link)),
+            _ => None,
+        })
+        .collect();
+    fetches(|f| f.done.retain(|(k, _)| !k.starts_with(OTHER_FETCH) || waited.contains(k)));
+    if !on {
+        return changed;
+    }
+    // The cap, [`max_others`] places, nearest first, with hysteresis:
+    // - Within the cap, the next players load (a load is the only way to know whether a skin
+    //   holds a model; one that holds none then takes no place).
+    // - With every place loaded, one nearer player may load as a trial, above the cap: only one
+    //   [`OTHER_SWAP_MARGIN`] blocks nearer than the farthest loaded one, which has drawn for
+    //   [`OTHER_MIN_HOLD`]. The farthest goes only once the trial has a model, so a pending player,
+    //   or one whose skin holds none, never costs a loaded model its place.
+    // - Past the cap (it was lowered, or a trial loaded): the farthest loaded go; loads past what
+    //   is free go, the trial excepted.
+    let max = o.max;
+    let order = |uuid: u128| players.iter().position(|p| p.uuid == uuid).unwrap_or(usize::MAX);
+    let distance = |uuid: u128| players.iter().find(|p| p.uuid == uuid).map_or(f32::INFINITY, |p| p.distance);
+    o.entries.sort_by_key(|e| order(e.uuid));
+    let ready = |e: &Other| matches!(e.load, OtherLoad::Ready(_));
+    let mut ready_n = o.entries.iter().filter(|e| ready(e)).count();
+    // The farthest loaded ones past the cap.
+    while ready_n > max {
+        let i = o.entries.iter().rposition(ready).expect("a loaded one");
+        let e = o.entries.remove(i);
+        forget_other(&e, &mut changed);
+        ready_n -= 1;
+    }
+    // Loads past the room left (one trial when every place is loaded).
+    let room = if ready_n >= max { 1 } else { max - ready_n };
+    let mut loads = 0;
+    o.entries.retain(|e| {
+        if !e.holds_place() || ready(e) {
+            return true;
+        }
+        loads += 1;
+        let keep = loads <= room;
+        if !keep {
+            forget_other(e, &mut changed);
+        }
+        keep
+    });
+    // Who may start a load now: a failed download due again, or a new player.
+    let due = |o: &Others, e: &Other| {
+        matches!(e.load, OtherLoad::Failed(_))
+            && o.failed.iter().any(|f| f.uuid == e.uuid && f.skin == e.skin && f.retry.is_some_and(|(at, _)| now >= at))
+    };
+    let mut starts: Vec<u128> = Vec::new();
+    let mut free = max.saturating_sub(o.entries.iter().filter(|e| e.holds_place()).count());
+    let farthest = o.entries.iter().filter(|e| ready(e)).last().map(|e| (distance(e.uuid), e.ready_at));
+    let trial_free = ready_n >= max && loads == 0;
+    let mut trial_taken = false;
+    for p in players {
+        let Some(skin) = &p.skin else { continue };
+        if own.contains(&p.uuid) {
+            continue;
+        }
+        let may = match o.entries.iter().find(|e| e.uuid == p.uuid) {
+            Some(e) => due(o, e),
+            None => o.failed_now(p.uuid, skin, now).is_none(),
+        };
+        if !may {
+            continue;
+        }
+        if free > 0 {
+            free -= 1;
+            starts.push(p.uuid);
+        } else if trial_free && !trial_taken {
+            let nearer = farthest.is_some_and(|(far, since)| {
+                p.distance + OTHER_SWAP_MARGIN < far && since.is_none_or(|t| now >= t + OTHER_MIN_HOLD)
+            });
+            if nearer {
+                trial_taken = true;
+                starts.push(p.uuid);
+            }
+        }
+    }
+    for e in &mut o.entries {
+        if starts.contains(&e.uuid) {
+            e.load = start_other_load(e.uuid, &e.skin, Vec::new(), reader, data_dir);
+        }
+    }
+    // The new players: those starting load; one that failed this session with this skin (not
+    // due again) shows the same error, loaded no more.
+    for p in players {
+        let Some(skin) = &p.skin else { continue };
+        if own.contains(&p.uuid) || o.entries.iter().any(|e| e.uuid == p.uuid) {
+            continue;
+        }
+        let load = if starts.contains(&p.uuid) {
+            start_other_load(p.uuid, skin, Vec::new(), reader, data_dir)
+        } else if let Some(error) = o.failed_now(p.uuid, skin, now) {
+            OtherLoad::Failed(error.to_owned())
+        } else {
+            continue;
+        };
+        o.entries.push(Other { uuid: p.uuid, skin: skin.clone(), load, region: None, ready_at: None });
+    }
+    changed
+}
+
+/// An entry goes: its load's outcome is dropped; the image changes when its model was in it.
+fn forget_other(e: &Other, changed: &mut bool) {
+    match e.load {
+        OtherLoad::Loading(job) => drop_job(job),
+        OtherLoad::Ready(_) => *changed = true,
+        _ => {}
+    }
+}
+
+/// `uuid` as messages name it: `player <uuid>`, dashed.
+fn other_name(uuid: u128) -> String {
+    let h = format!("{uuid:032x}");
+    format!("player {}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/// The download key of an other player's link `link`.
+fn other_fetch_key(link: &str) -> String {
+    format!("{OTHER_FETCH}{link}")
+}
+
+/// The most bytes the download known as `key` ([`take_fetch_requests`]) may take: an other
+/// player's link [`OTHER_MAX_LINK_BYTES`], the local player's 16 MiB. gist_fetch.rs stops there.
+pub fn fetch_limit(key: &str) -> u64 {
+    if key.starts_with(OTHER_FETCH) { OTHER_MAX_LINK_BYTES as u64 } else { LOCAL_MAX_LINK_BYTES }
+}
+
+/// `link text over 100 KiB`.
+fn over_link_cap() -> String {
+    format!("link text over {} KiB", OTHER_MAX_LINK_BYTES / 1024)
+}
+
+/// Starts loading `skin`'s model on a thread of its own, with the link texts `got` so far.
+fn start_other_load(uuid: u128, skin: &OtherSkin, got: Vec<(String, Vec<u8>)>, reader: &SkinReader, data_dir: Option<&Path>) -> OtherLoad {
+    let job = next_job();
+    let file = (reader.file)(&skin.location);
+    let (slim, texture, data_dir) = (skin.slim, reader.texture, data_dir.map(Path::to_path_buf));
+    spawn_named_job(
+        "others",
+        job,
+        move || JobOutcome::Other(load_other(uuid, &file, slim, texture, got, data_dir.as_deref())),
+        || JobOutcome::Other(OtherOutcome::Failed("cpm: another player's model: its load crashed".to_owned())),
+    );
+    OtherLoad::Loading(job)
+}
+
+/// `model data over 1 MiB`.
+fn over_cap() -> String {
+    format!("model data over {} MiB", OTHER_MAX_MODEL_BYTES / (1024 * 1024))
+}
+
+/// On a loading thread: the model in the skin `file` (`ModelDefinitionLoader.loadModel(Image,
+/// Player)`, the slim or wide channel per `slim`), its links from `got` or the link cache (a link
+/// in neither: [`OtherOutcome::Link`]), drawn with the skin (`texture`) when it has no texture of
+/// its own, within CPM's limits for other players. The texts downloaded are cached once it loads.
+fn load_other(
+    uuid: u128,
+    file: &Path,
+    slim: bool,
+    texture: fn(&[u8]) -> Option<([u32; 2], Vec<u8>)>,
+    got: Vec<(String, Vec<u8>)>,
+    data_dir: Option<&Path>,
+) -> OtherOutcome {
+    let name = other_name(uuid);
+    let fail = |e: String| OtherOutcome::Failed(format!("cpm: {name}: {e}"));
+    let png = match std::fs::read(file) {
+        Ok(png) => png,
+        Err(e) => return fail(format!("cannot read the skin {}: {e}", file.display())),
+    };
+    let img = match cpm_core::skin::Image::decode(&png) {
+        Ok(img) => img,
+        Err(e) => return fail(format!("cannot read the skin: {e}")),
+    };
+    let ty = if slim { cpm_core::format::SkinType::Slim } else { cpm_core::format::SkinType::Default };
+    let data = match cpm_core::skin::read_skin_data(&img, ty) {
+        Ok(Some(data)) => data,
+        Ok(None) => return OtherOutcome::Empty,
+        Err(e) => return fail(e.to_string()),
+    };
+    let bytes = cpm_core::skin::container(&data);
+    if got.iter().any(|(_, t)| t.len() > OTHER_MAX_LINK_BYTES) {
+        return fail(over_link_cap());
+    }
+    let total = std::cell::Cell::new(bytes.len() + got.iter().map(|(_, t)| t.len()).sum::<usize>());
+    if total.get() > OTHER_MAX_MODEL_BYTES {
+        return fail(over_cap());
+    }
+    let read_caches = RefCell::new(Vec::<PathBuf>::new());
+    let last = RefCell::new(String::new());
+    let missing = RefCell::new(None::<String>);
+    let text = |link: &str| -> cpm_core::Result<Vec<u8>> {
+        *last.borrow_mut() = link.to_owned();
+        if let Some((_, t)) = got.iter().find(|(l, _)| l == link) {
+            return Ok(t.clone());
+        }
+        cpm_core::link::link_urls(link)?;
+        let cache = data_dir.and_then(|d| cache_path(d, link)).filter(|c| c.is_file());
+        if let Some(cache) = cache {
+            let len = std::fs::metadata(&cache).map_or(0, |m| m.len() as usize);
+            // (A link the local player cached may be bigger than another player's may be.)
+            if len > OTHER_MAX_LINK_BYTES {
+                return Err(cpm_core::CpmError::Limit(over_link_cap()));
+            }
+            if total.get().saturating_add(len) > OTHER_MAX_MODEL_BYTES {
+                return Err(cpm_core::CpmError::Limit(over_cap()));
+            }
+            total.set(total.get() + len);
+            let t = std::fs::read(&cache).map_err(|e| cpm_core::CpmError::Invalid(format!("cannot read the cache: {e}")));
+            read_caches.borrow_mut().push(cache);
+            return t;
+        }
+        *missing.borrow_mut() = Some(link.to_owned());
+        Err(cpm_core::CpmError::NeedsLink(link.to_owned()))
+    };
+    // CPM's limits are checked before any texture is decoded (from the PNG headers).
+    let result = cpm_core::link::load_with_links_limited(&bytes, &text, &OTHER_LIMITS);
+    let (last, missing) = (last.into_inner(), missing.into_inner());
+    match result {
+        Ok(mut model) => {
+            // Without a texture of its own it draws with the skin (`ModelDefinition`).
+            if model.texture_rgba.is_empty()
+                && let Some((size, rgba)) = texture(&png)
+            {
+                cpm_core::skin::use_skin_texture(&mut model, size, rgba);
+            }
+            if let Err(e) = check_texture(&name, &model) {
+                return OtherOutcome::Failed(e);
+            }
+            for (link, t) in &got {
+                if let Some(cache) = data_dir.and_then(|d| cache_path(d, link))
+                    && let Err(e) = write_cache(&cache, t)
+                {
+                    log::warn!("{}", gist_error(&name, link, e));
+                }
+            }
+            OtherOutcome::Ready(Box::new(model))
+        }
+        Err(cpm_core::CpmError::NeedsLink(link)) if missing.as_deref() == Some(link.as_str()) => OtherOutcome::Link { link, got },
+        Err(e) if last.is_empty() => fail(e.to_string()),
+        Err(e) => {
+            // A cached text that does not load is downloaded afresh next time (as the local
+            // player's are); one past a limit is kept.
+            if !matches!(e, cpm_core::CpmError::Limit(_)) {
+                for cache in read_caches.into_inner() {
+                    let _ = std::fs::remove_file(cache);
+                }
+            }
+            OtherOutcome::Failed(gist_error(&name, &last, e))
+        }
+    }
+}
+
+/// The image the game holds now has the other players' models at `shown`.
+fn set_others_shown(shown: Vec<(u128, [u32; 2])>) {
+    OTHERS.with_borrow_mut(|o| o.shown = shown);
+}
+
+/// Whether rectangles `[x, y, w, h]` `a` and `b` overlap.
+fn overlaps(a: [u32; 4], b: [u32; 4]) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+/// The texture budget: a region of [`SPRITE`] for each loaded model, clear of `taken` (the local
+/// player's image and the picker's parts) and of each other. A model keeps the region it had
+/// while that stays clear; the others get the free spot that grows the image least ([`free_spot`]),
+/// so the image sent stays as small as it can (it is uploaded whole, from the top left). Those
+/// with no room left have no region: they draw vanilla until room frees up. Returns UUID, region
+/// and size of each placed.
+fn place_others(o: &mut Others, taken: &[[u32; 4]]) -> Vec<(u128, [u32; 2], [u32; 2])> {
+    let mut taken: Vec<[u32; 4]> = taken.iter().copied().filter(|r| r[2] > 0 && r[3] > 0).collect();
+    let mut placed = Vec::new();
+    for e in &mut o.entries {
+        let OtherLoad::Ready(m) = &e.load else {
+            e.region = None;
+            continue;
+        };
+        let [w, h] = model_composite(m).size;
+        if let Some(at) = e.region {
+            let r = [at[0], at[1], w, h];
+            if at[0] + w <= SPRITE_PX && at[1] + h <= SPRITE_PX && !taken.iter().any(|t| overlaps(*t, r)) {
+                taken.push(r);
+                placed.push((e.uuid, at, [w, h]));
+            } else {
+                e.region = None;
+            }
+        }
+    }
+    let mut no_room = 0;
+    for e in &mut o.entries {
+        let OtherLoad::Ready(m) = &e.load else { continue };
+        if e.region.is_some() {
+            continue;
+        }
+        let [w, h] = model_composite(m).size;
+        match free_spot([w, h], &taken) {
+            Some(at) => {
+                e.region = Some(at);
+                taken.push([at[0], at[1], w, h]);
+                placed.push((e.uuid, at, [w, h]));
+            }
+            None => no_room += 1,
+        }
+    }
+    o.no_room = no_room;
+    placed
+}
+
+/// The spot of [`SPRITE`] where a `w`x`h` image fits clear of `taken` and the image (the box from
+/// the top left around everything taken) grows least; of those the topmost, then the leftmost.
+/// Spots tried: at the left or top edge or a taken rectangle's right or bottom.
+fn free_spot([w, h]: [u32; 2], taken: &[[u32; 4]]) -> Option<[u32; 2]> {
+    if w == 0 || h == 0 || w > SPRITE_PX || h > SPRITE_PX {
+        return None;
+    }
+    let right = taken.iter().map(|t| t[0] + t[2]).max().unwrap_or(0);
+    let bottom = taken.iter().map(|t| t[1] + t[3]).max().unwrap_or(0);
+    let mut xs = vec![0];
+    let mut ys = vec![0];
+    for t in taken {
+        xs.push(t[0] + t[2]);
+        ys.push(t[1] + t[3]);
+    }
+    let mut best: Option<(u64, [u32; 2])> = None;
+    for &y in &ys {
+        for &x in &xs {
+            if x + w > SPRITE_PX || y + h > SPRITE_PX || taken.iter().any(|t| overlaps(*t, [x, y, w, h])) {
+                continue;
+            }
+            let area = right.max(x + w) as u64 * bottom.max(y + h) as u64;
+            if best.is_none_or(|(a, b)| (area, y, x) < (a, b[1], b[0])) {
+                best = Some((area, [x, y]));
+            }
+        }
+    }
+    best.map(|(_, at)| at)
 }

@@ -435,7 +435,9 @@ fn click_cycles_models() {
     assert_eq!(cpm::click(2, &models, None), Click::Convert);
     assert_eq!(cpm::click(3, &models, None), Click::GistLimit);
     assert_eq!(cpm::click(4, &models, None), Click::Gestures);
-    assert_eq!(cpm::click(5, &models, None), Click::Nothing);
+    assert_eq!(cpm::click(5, &models, None), Click::OthersToggle);
+    assert_eq!(cpm::click(6, &models, None), Click::MaxOthers);
+    assert_eq!(cpm::click(7, &models, None), Click::Nothing);
     // Stored as the file name ("" for none).
     assert_eq!(cpm::model_setting(Some(&b)), "b.cpmmodel");
     assert_eq!(cpm::model_setting(None), "");

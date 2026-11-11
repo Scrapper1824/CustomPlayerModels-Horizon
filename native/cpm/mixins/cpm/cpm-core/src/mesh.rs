@@ -204,33 +204,65 @@ pub fn load(bytes: &[u8]) -> Result<LoadedModel> {
     LoadedModel::from_file(read_cpmmodel(bytes)?)
 }
 
+/// The largest image side any texture may have ([`decode_png`] refuses more from the PNG's
+/// header, before allocating: CPM's 8192 for the local player, `TextureStitcher`).
+pub const MAX_TEXTURE_PX: u32 = 8192;
+
+/// Safety limits on a model ([`LoadedModel::from_file_limited`]): CPM's `MAX_TEX_SHEET_SIZE`
+/// (each texture sheet's image size, a side, from its PNG header; not its declared size) and `MAX_CUBE_COUNT`
+/// ([`Model::cube_count`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub max_texture_px: u32,
+    pub max_cubes: usize,
+}
+
+impl Limits {
+    /// The local player's: textures up to [`MAX_TEXTURE_PX`], any number of cubes.
+    pub const LOCAL: Limits = Limits { max_texture_px: MAX_TEXTURE_PX, max_cubes: usize::MAX };
+}
+
 impl LoadedModel {
     pub fn from_file(file: ModelFile) -> Result<LoadedModel> {
+        Self::from_file_limited(file, &Limits::LOCAL)
+    }
+
+    /// [`from_file`](Self::from_file) within `limits`, checked before any texture is decoded (as
+    /// `TextureProvider` checks the image block's size before reading it): a model past them is
+    /// an error.
+    pub fn from_file_limited(file: ModelFile, limits: &Limits) -> Result<LoadedModel> {
         if let Some(link) = &file.data.link {
             return Err(CpmError::NeedsLink(link.clone()));
         }
+        let max = limits.max_texture_px.min(MAX_TEXTURE_PX);
         let raw = file.data;
         let legacy = raw.legacy_anim.clone();
         let new = raw.new_anim.clone();
         let model = Model::build(raw)?;
+        let cubes = model.cube_count();
+        if cubes > limits.max_cubes {
+            return Err(CpmError::Limit(format!("{cubes} cubes are too many (at most {})", limits.max_cubes)));
+        }
+        // Only each image's own size (its PNG header, in `decode_png_max`) is held to the limit,
+        // as `TextureProvider` checks the image block: a declared UV size past it still loads.
         let set = match (legacy, new) {
             (Some(a), _) => decode_legacy(&a, &model)?,
             (None, Some(a)) => decode_new(&a, &model)?,
             (None, None) => AnimSet::default(),
         };
         let (png_px, texture_rgba) =
-            if model.texture_png.is_empty() { ([0, 0], Vec::new()) } else { decode_png(&model.texture_png)? };
-        let sheet = |t: &Option<crate::format::RawTexture>| -> Result<Option<Sheet>> {
+            if model.texture_png.is_empty() { ([0, 0], Vec::new()) } else { decode_png_max(&model.texture_png, max, "texture")? };
+        let sheet = |t: &Option<crate::format::RawTexture>, what: &str| -> Result<Option<Sheet>> {
             match t {
                 Some(t) if !t.png.is_empty() => {
-                    let (png_px, rgba) = decode_png(&t.png)?;
+                    let (png_px, rgba) = decode_png_max(&t.png, max, what)?;
                     Ok(Some(Sheet { rgba, texture_px: t.declared, png_px }))
                 }
                 _ => Ok(None),
             }
         };
-        let elytra = sheet(&model.elytra_texture)?;
-        let cape = sheet(&model.cape_texture)?;
+        let elytra = sheet(&model.elytra_texture, "elytra texture")?;
+        let cape = sheet(&model.cape_texture, "cape texture")?;
         let anim_textures = model.anim_textures.iter().map(|&t| AnimatedTexture::new(t)).collect();
         Ok(LoadedModel {
             elytra,
@@ -303,11 +335,28 @@ pub fn icon_rgba(file: &ModelFile) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 pub(crate) fn decode_png(bytes: &[u8]) -> Result<([u32; 2], Vec<u8>)> {
+    decode_png_max(bytes, MAX_TEXTURE_PX, "image")
+}
+
+/// [`decode_png`] of an image `what` whose sides may be at most `max` (at most
+/// [`MAX_TEXTURE_PX`]): checked from the header, before anything is allocated for its pixels; the
+/// decoder's own allocations are bounded to match.
+pub(crate) fn decode_png_max(bytes: &[u8], max: u32, what: &str) -> Result<([u32; 2], Vec<u8>)> {
+    let max = max.min(MAX_TEXTURE_PX);
     let err = |e: png::DecodingError| CpmError::Png(e.to_string());
-    let mut d = png::Decoder::new(std::io::Cursor::new(bytes));
+    // Room for a decoded `max` x `max` RGBA image twice over (its rows and the decoder's buffers).
+    let limits = png::Limits { bytes: (max as usize * max as usize * 4 * 2).max(1 << 20) };
+    let mut d = png::Decoder::new_with_limits(std::io::Cursor::new(bytes), limits);
     d.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut r = d.read_info().map_err(err)?;
+    let (w, h) = r.info().size();
+    if w > max || h > max {
+        return Err(CpmError::Limit(format!("{what} {w}x{h} is too big (at most {max}x{max})")));
+    }
     let size = r.output_buffer_size().ok_or_else(|| CpmError::Png("image too large".into()))?;
+    if size > max as usize * max as usize * 4 {
+        return Err(CpmError::Png("image too large".into()));
+    }
     let mut buf = vec![0; size];
     let info = r.next_frame(&mut buf).map_err(err)?;
     buf.truncate(info.buffer_size());
