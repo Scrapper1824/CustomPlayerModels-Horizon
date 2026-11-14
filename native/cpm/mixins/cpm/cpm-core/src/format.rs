@@ -198,6 +198,28 @@ fn read_cpmmodel_with(bytes: &[u8], resolve: Option<Resolve>) -> Result<ModelFil
     Ok(ModelFile { name, desc, data, icon_png })
 }
 
+/// The `.cpmmodel` `bytes` with its icon left out (an empty icon block) and the checksum redone:
+/// name, description, data and overflow (with its link) kept as they are. What other players are
+/// sent is the model, not its picker picture, so its size is the model's own.
+pub fn strip_icon(bytes: &[u8]) -> Result<Vec<u8>> {
+    // Validates the whole file (checksum included) first.
+    read_cpmmodel(bytes)?;
+    let mut r = Reader::new(bytes);
+    r.u8()?;
+    r.utf()?;
+    r.utf()?;
+    r.block()?;
+    let overflow = r.block()?;
+    if overflow.remaining() > 0 {
+        let n = r.u8()? as usize;
+        r.bytes(n)?;
+    }
+    let icon_at = r.pos();
+    let mut body = bytes[1..icon_at].to_vec();
+    body.push(0); // an empty block: length 0
+    Ok(crate::write::checksummed(HEADER, &body))
+}
+
 fn block_bytes(mut b: Reader<'_>) -> &[u8] {
     let n = b.remaining();
     b.bytes(n).unwrap_or(&[])

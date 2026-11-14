@@ -309,6 +309,12 @@ impl LoadedModel {
     /// As [`pose`](Self::pose), with the item anchors ([`pose_model_with_items`]).
     pub fn pose_with_items(&mut self, input: &PoseInput) -> Posed {
         let frame = self.engine.sample(input);
+        if self.engine.drives_head_look() {
+            // The head yaw / pitch poses turn the head (they read the look from `input`); the
+            // head bone itself stays still ([`Engine::drives_head_look`]).
+            let still = PoseInput { head_yaw: 0.0, pitch: 0.0, ..*input };
+            return pose_model_with_items(&self.model, &frame, &still);
+        }
         pose_model_with_items(&self.model, &frame, input)
     }
 

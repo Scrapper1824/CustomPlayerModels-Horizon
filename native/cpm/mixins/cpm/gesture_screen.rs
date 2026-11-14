@@ -13,8 +13,8 @@ use crate::game::cpm_mod as cpm;
 use cpm_core::anim::{Button, ButtonKind, ButtonState};
 use horizon_client::mod_api::{HudBatch, NativeScreenView};
 
-/// Once a frame: opens the screen for a menu request (the key or `Gestures…`) when the game lets
-/// it (over the world with no other screen up: a request from the settings page waits until the
+/// Once a frame: opens the screen for a menu request (the key) when the game lets
+/// it (over the world with no other screen up: a request waits until the
 /// menus are closed), and drops the menu once its screen closed (Escape) or the mod was turned
 /// off.
 pub(super) fn frame(game: &mut Game<'_>) {

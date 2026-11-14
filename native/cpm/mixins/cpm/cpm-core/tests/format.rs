@@ -230,3 +230,46 @@ fn extruded_cube_is_sliced_per_texel() {
     // Every slice samples a single texel line: zero width in u or in v.
     assert!(q[2..].iter().all(|f| f.uv[0] == f.uv[2] || f.uv[1] == f.uv[3]));
 }
+
+/// What is shared with other players is the model, not its picker icon: `strip_icon` rewrites a
+/// `.cpmmodel` with an empty icon (name, description, data and overflow kept), still valid.
+#[test]
+fn strip_icon_keeps_the_model_drops_the_picture() {
+    use cpm_core::format::strip_icon;
+    use cpm_core::write::{checksummed, Writer};
+    // A definition with no cubes, as a data block.
+    let mut def = Writer::new();
+    def.varint(0).object_block(0, &Writer::new());
+    let mut body = Writer::new();
+    body.object_block(3, &def).object_block(0, &Writer::new());
+    let data = checksummed(0x53, &body.into_bytes());
+    let mut d = Writer::new();
+    d.bytes(&data);
+    let mut icon = Writer::new();
+    icon.bytes(&[7u8; 5000]);
+    let mut w = Writer::new();
+    w.utf("Name").utf("Desc").block(&d).block(&Writer::new()).block(&icon);
+    let file = checksummed(0x53, &w.into_bytes());
+
+    let stripped = strip_icon(&file).unwrap();
+    assert!(stripped.len() + 4900 < file.len(), "{} vs {}", stripped.len(), file.len());
+    let a = read_cpmmodel(&file).unwrap();
+    let b = read_cpmmodel(&stripped).unwrap();
+    assert_eq!((b.name.as_str(), b.desc.as_str()), ("Name", "Desc"));
+    assert_eq!(b.icon_png, Vec::<u8>::new());
+    assert_eq!(a.data, b.data);
+    // A file that is already icon-less comes back the same; a broken one is an error.
+    assert_eq!(strip_icon(&stripped).unwrap(), stripped);
+    assert!(strip_icon(&file[..file.len() - 1]).is_err());
+}
+
+/// The overflow block and its link are kept (big models live there).
+#[test]
+fn strip_icon_keeps_the_overflow() {
+    if common::missing(&["ReggieTheRat.cpmmodel"]) {
+        return;
+    }
+    let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/samples/ReggieTheRat.cpmmodel")).unwrap();
+    let stripped = cpm_core::format::strip_icon(&file).unwrap();
+    assert_eq!(read_cpmmodel(&stripped).unwrap().data, read_cpmmodel(&file).unwrap().data);
+}

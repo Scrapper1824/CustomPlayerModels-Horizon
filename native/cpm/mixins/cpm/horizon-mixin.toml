@@ -1,6 +1,6 @@
 [mod]
 id = "cpm"
-version = "0.2.0"
+version = "0.3.0"
 priority = 100
 
 # The commit it was tested on. It uses the native hook points (hook points v411 in compatibility.json)
@@ -10,11 +10,9 @@ priority = 100
 [compatibility]
 horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
 
-# A trait-mod package that overrides nothing (api/src/lib.rs). It puts CPM in the game's mod list
-# (`mod_api::mods()`): the game reserves the `horizon/modimage` sprite, which holds the model's
-# texture, only when that list is not empty, and a mixin-only mod is not in it.
-[api]
-path = "api"
+# No `[api]` package: Horizon reserves the `horizon/modimage` sprite (the model's texture) whenever
+# the game is built with native mods (`mods::built_with_native_mods`), so a trait mod is not needed.
+# Without one, the launcher builds the game's own main, not a generated one.
 
 # The mod's state and logic, free of game types: also the Cargo library its tests use.
 [[module]]
@@ -382,3 +380,82 @@ bindings = [
   { name = "c", ty = "char", value = "c" },
   { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
 ]
+
+# Models shared in Horizon-hosted worlds: the `cpm:sync` mod messages between the mod's client half
+# (the window) and its server half (an integrated server, open to LAN or not, or a Horizon server),
+# both in net.rs (no hook of its own). Their logic (the messages, the relay, what is sent) is in
+# runtime.rs.
+[[module]]
+id = "net"
+file = "crates/horizon-client/src/game.rs"
+name = "cpm_net"
+source = "net.rs"
+
+# Once a tick in every game: the window sends its model, a server relays its players'.
+[[injection]]
+id = "net_tick"
+hook = "tick"
+hook_version = 1
+kind = "HEAD"
+helper = "net_tick.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
+
+# A mod message from a player's client (the server half).
+[[injection]]
+id = "net_from_client"
+hook = "net_from_client"
+hook_version = 1
+kind = "HEAD"
+helper = "net_from_client.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "channel", ty = "&str", value = "channel" },
+  { name = "data", ty = "&[u8]", value = "data" },
+]
+
+# A mod message from the server (the client half).
+[[injection]]
+id = "net_from_server"
+hook = "net_from_server"
+hook_version = 1
+kind = "HEAD"
+helper = "net_from_server.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "channel", ty = "&str", value = "channel" },
+  { name = "data", ty = "&[u8]", value = "data" },
+]
+
+# A player joined the server, the host included.
+[[injection]]
+id = "net_joined"
+hook = "player_logged_in"
+hook_version = 1
+kind = "HEAD"
+helper = "net_joined.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+]
+
+# A player left the server.
+[[injection]]
+id = "net_left"
+hook = "player_logged_out"
+hook_version = 1
+kind = "HEAD"
+helper = "net_left.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+]
+
+# The window's connection ends: what the server sent goes, and the model is sent again next time.
+[[injection]]
+id = "net_disconnect"
+hook = "client_disconnecting"
+hook_version = 1
+kind = "HEAD"
+helper = "net_disconnect.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "&*self" }]

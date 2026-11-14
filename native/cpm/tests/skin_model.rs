@@ -52,7 +52,7 @@ fn skin(location: &str, data: Option<&[u8]>) -> cpm::SkinInput {
 }
 
 fn idle() -> cpm::ConvertView<'static> {
-    cpm::ConvertView { busy: false, last: None, limit_kib: 8, old_conversion: false }
+    cpm::ConvertView { busy: false, last: None, old_conversion: false }
 }
 
 #[test]

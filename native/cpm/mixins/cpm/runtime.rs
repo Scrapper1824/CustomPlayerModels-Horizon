@@ -85,6 +85,15 @@ struct State {
     skin: Option<SkinState>,
     /// The skin `model` (or `error`) is for, when it is the skin's model ([`is_skin`]).
     loaded_skin: Option<String>,
+    /// What the other players are sent of the loaded selection, once it loads ([`share_plan`] of
+    /// its file's bytes, read as they were loaded).
+    share: Option<SharePlan>,
+    /// Counts the loads that set `share` (a file loaded again is sent again).
+    share_gen: u64,
+    /// The held-back models whose gist popup was shown this session ([`prompt_gist`]).
+    gist_prompted: Vec<PathBuf>,
+    /// The `model` setting to keep, chosen outside the settings page ([`take_model_setting_due`]).
+    model_setting_due: Option<String>,
 }
 
 /// The `model` setting's value for the model stored in the player's skin ([`skin_selection`]).
@@ -250,6 +259,7 @@ pub fn ensure_loaded() {
         s.desc = None;
         s.old_conversion = false;
         s.preview_fit = None;
+        s.share = None;
         let Some(path) = want else { return };
         let name = shown_name(Some(&path));
         let bytes = if is_skin(&path) {
@@ -266,6 +276,8 @@ pub fn ensure_loaded() {
             }
         };
         s.desc = cpm_core::format::read_cpmmodel(&bytes).ok().map(|f| f.desc);
+        s.share = Some(share_plan(Some(&bytes)));
+        s.share_gen += 1;
         match cpm_core::load(&bytes) {
             Ok(model) => accept(s, &name, model),
             Err(cpm_core::CpmError::NeedsLink(link)) => load_link(s, &name, bytes, link),
@@ -801,19 +813,32 @@ fn patch(c: &mut Composed, model: &LoadedModel, base: [u32; 2]) -> bool {
     fits
 }
 
-/// Runs the animated textures ([`LoadedModel::tick_textures`]) of the selected model and of the
-/// picker's previewed one at the animation clock ([`clock_ms`]) `now`. A model whose pixels
-/// changed has its part of the image put in again, and the image is sent at the next
-/// [`texture_upload`]; otherwise nothing is sent.
+/// Runs the animated textures ([`LoadedModel::tick_textures`]) of the selected model, of the
+/// picker's previewed one and (when the [`SafetyLevel`] enables animated textures,
+/// `ENABLE_ANIMATED_TEXTURES`) of the other players' models drawn, at the animation clock
+/// ([`clock_ms`]) `now`. A model whose pixels changed has its part of the image put in again, and
+/// the image is sent at the next [`texture_upload`]; otherwise nothing is sent.
 pub fn tick_textures(now: Instant) {
     let time = clock_ms(now);
+    let others: Vec<u128> = OTHERS.with_borrow_mut(|o| {
+        if !o.safety.profile().animated_textures {
+            return Vec::new();
+        }
+        o.entries
+            .iter_mut()
+            .filter_map(|e| match &mut e.load {
+                OtherLoad::Ready(m) if e.region.is_some() => m.tick_textures(time).then_some(e.uuid),
+                _ => None,
+            })
+            .collect()
+    });
     STATE.with_borrow_mut(|s| {
         let model = s.model.as_mut().is_some_and(|m| m.tick_textures(time));
         let preview = match s.picker.as_mut().map(|p| &mut p.preview) {
             Some(Preview::Ready(p)) => p.model.tick_textures(time),
             _ => false,
         };
-        if !model && !preview {
+        if !model && !preview && others.is_empty() {
             return;
         }
         s.upload_due = true;
@@ -832,6 +857,13 @@ pub fn tick_textures(now: Instant) {
             && let (Some(at), Some(Picker { preview: Preview::Ready(p), .. })) = (c.layout.preview_at, s.picker.as_ref())
         {
             patched &= patch(c, &p.model, at);
+        }
+        for uuid in &others {
+            let Some(at) = c.others.iter().find(|(u, _)| u == uuid).map(|(_, at)| *at) else { continue };
+            patched &= OTHERS.with_borrow(|o| match o.entries.iter().find(|e| e.uuid == *uuid).map(|e| &e.load) {
+                Some(OtherLoad::Ready(m)) => patch(c, m, at),
+                _ => true,
+            });
         }
         if !patched {
             s.composed = None;
@@ -1713,7 +1745,7 @@ pub fn keys() -> Vec<[String; 3]> {
     vec![[MENU_KEY.to_owned(), "Gesture menu".to_owned(), DEFAULT_MENU_KEY.to_owned()]]
 }
 
-/// Asks for the gesture menu (the menu key or the settings page's `Gestures…`). The frame hook
+/// Asks for the gesture menu (the menu key). The frame hook
 /// opens it ([`take_menu_request`]).
 pub fn request_menu() {
     STATE.with_borrow_mut(|s| s.menu_requested = true);
@@ -1725,7 +1757,7 @@ pub fn take_menu_request() -> bool {
 }
 
 /// Whether the menu is asked for, without clearing the request: the frame hook keeps it until
-/// the screen can open (the settings page's `Gestures…` waits out the menus).
+/// the screen can open (it waits out any other screen).
 pub fn menu_requested() -> bool {
     STATE.with_borrow(|s| s.menu_requested)
 }
@@ -2988,14 +3020,12 @@ pub struct ConvertView<'a> {
     pub busy: bool,
     /// The last conversion's outcome.
     pub last: Option<&'a ConvertResult>,
-    /// The `gist_limit_kib` setting ([`gist_limit`]).
-    pub limit_kib: u32,
     /// The selected model was made by an older converter ([`old_conversion`]).
     pub old_conversion: bool,
 }
 
 /// The settings page: the model (button 0), the folder (button 1), `Convert project…` (button 2),
-/// the gist limit (button 3), `Gestures…` (button 4), then [`SKIN_IN_USE`] when `selected` (the
+/// then [`SKIN_IN_USE`] when `selected` (the
 /// [`active_selection`]) is the skin's model, the last conversion's outcome and the model's error
 /// if any.
 pub fn settings_labels(
@@ -3013,8 +3043,6 @@ pub fn settings_labels(
         format!("Model: {model}"),
         "Open models folder".to_owned(),
         if convert.busy { "Converting…" } else { "Convert project…" }.to_owned(),
-        format!("Gist limit: {} KiB", convert.limit_kib),
-        "Gestures…".to_owned(),
     ];
     if skin {
         labels.push(SKIN_IN_USE.to_owned());
@@ -3028,7 +3056,7 @@ pub fn settings_labels(
 }
 
 /// What the settings page shows of the other players' models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OthersView {
     /// The `others` setting ([`others_on`]).
     pub on: bool,
@@ -3038,27 +3066,44 @@ pub struct OthersView {
     pub loaded: usize,
     /// Loaded, but with no room left in [`SPRITE`]: drawn vanilla.
     pub no_room: usize,
+    /// The `safety` setting ([`safety_level`]).
+    pub safety: SafetyLevel,
+    /// The players here whose models the safety level blocks ([`SafetyProfile`]'s limits).
+    pub blocked: usize,
+    /// Why the first of them is blocked (`269 cubes are too many (at most 256)`).
+    pub blocked_reason: Option<String>,
 }
 
-/// The whole settings page: [`settings_labels`] with `Other players' models: On/Off` (button 5)
-/// and `Max other models: N` (button 6) after `Gestures…`, then (while on) how many other
-/// players' models are drawn, before the information lines.
+/// The whole settings page: [`settings_labels`] with `Other players' models: On/Off` (button 3),
+/// `Max other models: N` (button 4) and `Safety level: Medium` (button [`SAFETY_BUTTON`]) after
+/// `Convert project…`, then `gist` (the [`gist_button`], button [`GIST_BUTTON`], when shown), then
+/// (while on) how many other players' models are drawn and how many the safety level blocks,
+/// before the information lines.
 pub fn settings_page(
     selected: Option<&Path>,
     error: Option<&str>,
     convert: &ConvertView<'_>,
     others: &OthersView,
+    gist: Option<&str>,
 ) -> Vec<String> {
     let mut labels = settings_labels(selected, error, convert);
     let mut own = vec![
         format!("Other players' models: {}", if others.on { "On" } else { "Off" }),
         format!("Max other models: {}", others.max),
+        format!("Safety level: {}", others.safety.label()),
     ];
+    own.extend(gist.map(str::to_owned));
     if others.on {
         let room = if others.no_room > 0 { format!(" ({} without room)", others.no_room) } else { String::new() };
         own.push(format!("Other players' models loaded: {}{room}", others.loaded));
+        if others.blocked > 0 {
+            let n = others.blocked;
+            let why = others.blocked_reason.as_ref().map_or_else(String::new, |r| format!(" ({r})"));
+            let s = if n == 1 { "" } else { "s" };
+            own.push(format!("Blocked by safety level: {n} player{s}{why} — raise the safety level to see them"));
+        }
     }
-    let at = labels.len().min(5);
+    let at = labels.len().min(3);
     labels.splice(at..at, own);
     labels
 }
@@ -3071,19 +3116,33 @@ pub enum Click {
     OpenFolder,
     /// Pick a `.cpmproject` and convert it (nothing while a conversion runs).
     Convert,
-    /// Store the next gist limit ([`next_gist_limit`]).
-    GistLimit,
-    /// Open the gesture menu ([`request_menu`]).
-    Gestures,
+    /// `Make a gist link…`: the held-back model's gist popup ([`make_gist`]).
+    MakeGist,
     /// Turn the other players' models on or off ([`set_others_on`]) and keep it.
     OthersToggle,
     /// Store the next most other players' models drawn ([`next_max_others`]).
     MaxOthers,
+    /// Store the next safety level ([`SafetyLevel::next`], [`set_safety_level`]).
+    Safety,
     Nothing,
 }
 
-/// A click on button `button`: the model button cycles None, first, ..., last, None.
+/// The `Safety level` button's place on the settings page ([`settings_page`]).
+pub const SAFETY_BUTTON: usize = 5;
+
+/// The `Make a gist link…` button's place on the settings page, when shown ([`settings_page`]).
+pub const GIST_BUTTON: usize = 6;
+
+/// A click on button `button` of a page without the gist button ([`click_page`]). Only the tests
+/// ask (the game's click.rs knows whether the page has it).
+#[allow(dead_code)]
 pub fn click(button: usize, models: &[PathBuf], selected: Option<&Path>) -> Click {
+    click_page(button, models, selected, false)
+}
+
+/// A click on button `button` of the settings page, `gist`: with the gist button (the same
+/// [`gist_button`] the page was built with). The model button cycles None, first, ..., last, None.
+pub fn click_page(button: usize, models: &[PathBuf], selected: Option<&Path>, gist: bool) -> Click {
     match button {
         0 => {
             let at = selected.and_then(|s| models.iter().position(|m| m == s));
@@ -3094,10 +3153,10 @@ pub fn click(button: usize, models: &[PathBuf], selected: Option<&Path>) -> Clic
         }
         1 => Click::OpenFolder,
         2 => Click::Convert,
-        3 => Click::GistLimit,
-        4 => Click::Gestures,
-        5 => Click::OthersToggle,
-        6 => Click::MaxOthers,
+        3 => Click::OthersToggle,
+        4 => Click::MaxOthers,
+        SAFETY_BUTTON => Click::Safety,
+        GIST_BUTTON if gist => Click::MakeGist,
         _ => Click::Nothing,
     }
 }
@@ -3159,21 +3218,9 @@ pub fn converted_version(desc: &str) -> Option<u32> {
     n.parse().ok()
 }
 
-/// The setting the gist limit (KiB) is kept under.
-pub const GIST_LIMIT_SETTING: &str = "gist_limit_kib";
-
-/// The stored gist limit in KiB: 8 when unset or not a number, else clamped to 1..=1024.
-pub fn gist_limit(setting: Option<String>) -> u32 {
-    setting.and_then(|s| s.trim().parse::<u64>().ok()).map_or(8, |n| n.clamp(1, 1024) as u32)
-}
-
-/// The gist limit button's next value: 4, 8, 16, 32, 64, then 4 again (anything else: 4).
-pub fn next_gist_limit(kib: u32) -> u32 {
-    match kib {
-        4 | 8 | 16 | 32 => kib * 2,
-        _ => 4,
-    }
-}
+/// The gist limit, fixed: a converted model bigger than this many KiB gets the gist popup (and
+/// is shared as a gist link, not sent whole). Not a setting.
+pub const GIST_LIMIT_KIB: u32 = 64;
 
 /// The gist text file written next to a too-big `model`: `<stem>.gist.txt`.
 pub fn gist_path(model: &Path) -> PathBuf {
@@ -3213,7 +3260,8 @@ pub fn convert_project(project: &Path, models: &Path, limit_kib: u32) -> Convert
         parsed.desc.push_str(&format!(" (converted by CPM for Horizon, v{CONVERTER_VERSION})"));
         let model = cpm_core::export::export_model(&parsed).map_err(|e| e.to_string())?;
         check_export(&model)?;
-        let too_big = model.len() > limit_kib as usize * 1024;
+        // Judged as it is shared: without its icon ([`shared_bytes`]).
+        let too_big = shared_bytes(&model).len() > limit_kib as usize * 1024;
         let gist = if too_big { Some(cpm_core::link::gist_text(&model).map_err(|e| e.to_string())?) } else { None };
         std::fs::create_dir_all(models).map_err(|e| format!("cannot make {}: {e}", models.display()))?;
         let path = output_path(models, project);
@@ -3464,14 +3512,18 @@ impl GistPopup {
     }
 }
 
-/// The popup's lines under its title.
+/// How many [`popup_lines`] there are.
+pub const GIST_LINES: usize = 5;
+
+/// The popup's lines under its title ([`GIST_LINES`] of them).
 pub fn popup_lines(p: &GistPopup) -> Vec<String> {
     let gist = file_name(Some(&gist_path(&p.model)));
     vec![
         format!("{} is {} KiB, too big to send directly.", file_name(Some(&p.model)), p.size.div_ceil(1024)),
         format!("1. Press Copy text (also saved as {gist})."),
-        "2. Create a public gist with it at gist.github.com.".to_owned(),
-        "3. Paste the gist link here and press Save link.".to_owned(),
+        "2. Press Open gist.github.com, paste it, create a public gist.".to_owned(),
+        "3. Copy the new gist's link, paste it here, press Save link.".to_owned(),
+        format!("4. {}.link.cpmmodel is then your model: others get it.", p.stem()),
     ]
 }
 
@@ -3521,7 +3573,7 @@ pub fn gist_layout(window: [f32; 4]) -> GistLayout {
     let width = (ww - 16.0).clamp(160.0, 420.0);
     let title_y = GIST_PAD;
     let lines_y = title_y + 16.0;
-    let field_y = lines_y + 4.0 * GIST_LINE_H + 4.0;
+    let field_y = lines_y + GIST_LINES as f32 * GIST_LINE_H + 4.0;
     let field_h = 14.0;
     let message_y = field_y + field_h + 4.0;
     let buttons_y = message_y + GIST_LINE_H + 4.0;
@@ -3678,23 +3730,138 @@ pub const MAX_OTHERS_SETTING: &str = "max_others";
 pub const DEFAULT_MAX_OTHERS: usize = 8;
 /// The `Max other models` button's values, in turn.
 const MAX_OTHERS_CHOICES: [usize; 6] = [1, 2, 4, 8, 16, 32];
-/// The most text one of another player's links may have (`ConfigKeys.MAX_LINK_SIZE`, its default
-/// for players who are not friends: 100 KB), enforced while downloading ([`fetch_limit`]) and on
+/// The most text one of another player's links may have at the default [`SafetyLevel::Medium`]
+/// (`ConfigKeys.MAX_LINK_SIZE`: 100 KB), enforced while downloading ([`fetch_limit`]) and on
 /// cached texts. The local player's own links keep the gist fetcher's 16 MiB.
 pub const OTHER_MAX_LINK_BYTES: usize = 100 * 1024;
-/// The most model data another player's model may have: its skin data and the texts of all its
-/// links together.
+/// The most model data another player's model may have at [`SafetyLevel::Medium`]: its skin data
+/// and the texts of all its links together.
 pub const OTHER_MAX_MODEL_BYTES: usize = 1024 * 1024;
 /// The local player's link downloads: the most text taken.
 const LOCAL_MAX_LINK_BYTES: u64 = 16 * 1024 * 1024;
-/// CPM's limits for other players' models (`ModelDefinition.validate`, `TextureProvider`).
-const OTHER_LIMITS: cpm_core::Limits = cpm_core::Limits { max_texture_px: OTHER_MAX_TEXTURE_PX, max_cubes: OTHER_MAX_CUBES };
-/// The largest texture sheet side of another player's model (`ConfigKeys.MAX_TEX_SHEET_SIZE`, its
-/// default for players who are not friends).
+/// The largest texture sheet side of another player's model at [`SafetyLevel::Medium`]
+/// (`ConfigKeys.MAX_TEX_SHEET_SIZE`).
 pub const OTHER_MAX_TEXTURE_PX: u32 = 256;
-/// The most cubes another player's model may have (`ConfigKeys.MAX_CUBE_COUNT`, its default for
-/// players who are not friends; extruded cubes count as `BoxRender.getExtrudeSize` says).
+/// The most cubes another player's model may have at [`SafetyLevel::Medium`]
+/// (`ConfigKeys.MAX_CUBE_COUNT`; extruded cubes count as `BoxRender.getExtrudeSize` says).
 pub const OTHER_MAX_CUBES: usize = 256;
+
+/// The setting that keeps the [`SafetyLevel`] ([`safety_level`]).
+pub const SAFETY_SETTING: &str = "safety";
+
+/// CPM's safety profile for other players' models (`BuiltInSafetyProfiles`), the `safety` setting.
+/// The local player's own model is never held to it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SafetyLevel {
+    /// Every limit as high as CPM's settings go.
+    Off,
+    Low,
+    /// CPM's default profile.
+    #[default]
+    Medium,
+    /// No other player's model loads (`ENABLE_MODEL_LOADING` off).
+    High,
+}
+
+/// A [`SafetyLevel`]'s limits: `BuiltInSafetyProfiles`' values (`ConfigKeys.SAFETY_KEYS`), and the
+/// most model data in all ([`OTHER_MAX_MODEL_BYTES`] at Medium), which CPM has not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafetyProfile {
+    /// `ENABLE_MODEL_LOADING`: other players' models load at all.
+    pub models: bool,
+    /// `ENABLE_ANIMATED_TEXTURES`: their animated textures run.
+    pub animated_textures: bool,
+    /// `MAX_TEX_SHEET_SIZE`: the largest texture sheet side, from its PNG header.
+    pub max_texture_px: u32,
+    /// `MAX_LINK_SIZE`, in KiB: the most text of one link ([`SafetyProfile::link_bytes`]).
+    pub max_link_kib: usize,
+    /// `MAX_CUBE_COUNT` (extruded cubes count as `BoxRender.getExtrudeSize` says).
+    pub max_cubes: usize,
+    /// The skin data and the texts of all links together: 1 MiB at Medium, 4 MiB at Low (four of
+    /// its largest links), 32 MiB at Off (two of the gist fetcher's largest).
+    pub max_model_bytes: usize,
+}
+
+impl SafetyProfile {
+    /// The most bytes of one link's text: [`max_link_kib`](Self::max_link_kib), within the gist
+    /// fetcher's own 16 MiB (Off's 256 MiB is past what any download takes).
+    pub fn link_bytes(&self) -> usize {
+        (self.max_link_kib * 1024).min(LOCAL_MAX_LINK_BYTES as usize)
+    }
+
+    /// Every limit of `self` as high as `other`'s, or higher: what loaded within `other` loads
+    /// within `self`.
+    fn covers(&self, other: &SafetyProfile) -> bool {
+        (self.models || !other.models)
+            && self.max_texture_px >= other.max_texture_px
+            && self.max_link_kib >= other.max_link_kib
+            && self.max_cubes >= other.max_cubes
+            && self.max_model_bytes >= other.max_model_bytes
+    }
+
+    fn limits(&self) -> cpm_core::Limits {
+        cpm_core::Limits { max_texture_px: self.max_texture_px, max_cubes: self.max_cubes }
+    }
+}
+
+impl SafetyLevel {
+    /// Its limits (`BuiltInSafetyProfiles`).
+    pub fn profile(self) -> SafetyProfile {
+        let p = |models, animated_textures, max_texture_px, max_link_kib, max_cubes, max_model_bytes| SafetyProfile {
+            models,
+            animated_textures,
+            max_texture_px,
+            max_link_kib,
+            max_cubes,
+            max_model_bytes,
+        };
+        match self {
+            SafetyLevel::Off => p(true, true, 8192, 256 * 1024, i32::MAX as usize, 32 * 1024 * 1024),
+            SafetyLevel::Low => p(true, true, 512, 1024, 1024, 4 * 1024 * 1024),
+            SafetyLevel::Medium => p(true, false, OTHER_MAX_TEXTURE_PX, OTHER_MAX_LINK_BYTES / 1024, OTHER_MAX_CUBES, OTHER_MAX_MODEL_BYTES),
+            SafetyLevel::High => p(false, false, 0, 0, 0, 0),
+        }
+    }
+
+    /// As the button shows it (`label.cpm.safetyProfile.*`).
+    pub fn label(self) -> &'static str {
+        match self {
+            SafetyLevel::Off => "Off",
+            SafetyLevel::Low => "Low",
+            SafetyLevel::Medium => "Medium",
+            SafetyLevel::High => "High",
+        }
+    }
+
+    /// The `safety` setting's value (CPM's `safetyProfile` names).
+    pub fn setting(self) -> &'static str {
+        match self {
+            SafetyLevel::Off => "off",
+            SafetyLevel::Low => "low",
+            SafetyLevel::Medium => "medium",
+            SafetyLevel::High => "high",
+        }
+    }
+
+    /// The button's next value: Medium, Low, Off, High, then Medium again.
+    pub fn next(self) -> SafetyLevel {
+        match self {
+            SafetyLevel::Medium => SafetyLevel::Low,
+            SafetyLevel::Low => SafetyLevel::Off,
+            SafetyLevel::Off => SafetyLevel::High,
+            SafetyLevel::High => SafetyLevel::Medium,
+        }
+    }
+}
+
+/// The stored `safety` setting: [`SafetyLevel::Medium`] when unset or unknown.
+pub fn safety_level(setting: Option<String>) -> SafetyLevel {
+    let s = setting.map(|s| s.trim().to_ascii_lowercase());
+    [SafetyLevel::Off, SafetyLevel::Low, SafetyLevel::Medium, SafetyLevel::High]
+        .into_iter()
+        .find(|l| s.as_deref() == Some(l.setting()))
+        .unwrap_or_default()
+}
 /// The prefix of an other player's link download (its [`start_fetch_as`] key): the local player's
 /// downloads and theirs never take each other's results.
 const OTHER_FETCH: &str = "others|";
@@ -3739,6 +3906,47 @@ pub struct OtherPlayer {
     pub distance: f32,
 }
 
+/// Where another player's model comes from.
+#[derive(Debug, Clone)]
+enum OtherSource {
+    /// The model stored in their skin.
+    Skin(OtherSkin),
+    /// The model the server sent of them (number `seq`, [`Others::net`]), which wins over the
+    /// skin's; their skin, if any, gives it a texture when it has none of its own.
+    Net { seq: u64, data: std::sync::Arc<Vec<u8>>, skin: Option<OtherSkin>, digest: u64 },
+}
+
+impl PartialEq for OtherSource {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (OtherSource::Skin(a), OtherSource::Skin(b)) => a == b,
+            // (A model's number names its data.)
+            (OtherSource::Net { seq: a, skin: sa, .. }, OtherSource::Net { seq: b, skin: sb, .. }) => a == b && sa == sb,
+            _ => false,
+        }
+    }
+}
+
+/// What the server last sent of a player ([`Others::net`]).
+enum NetModel {
+    /// Their chosen model's `.cpmmodel` (within [`SYNC_MAX_INLINE`]), number `seq`.
+    Model { seq: u64, data: std::sync::Arc<Vec<u8>>, digest: u64 },
+    /// They draw vanilla (no model, the mod off, or a model too big to send).
+    Clear,
+}
+
+/// `p`'s model source: what the server sent of them (nothing for a [`NetModel::Clear`]), else
+/// their skin's.
+fn source_of(net: &[(u128, NetModel)], p: &OtherPlayer) -> Option<OtherSource> {
+    match net.iter().find(|(u, _)| *u == p.uuid).map(|(_, m)| m) {
+        Some(NetModel::Model { seq, data, digest }) => {
+            Some(OtherSource::Net { seq: *seq, data: data.clone(), skin: p.skin.clone(), digest: *digest })
+        }
+        Some(NetModel::Clear) => None,
+        None => p.skin.clone().map(OtherSource::Skin),
+    }
+}
+
 /// How much nearer (blocks) a player must be than the farthest one drawn to take their place.
 pub const OTHER_SWAP_MARGIN: f32 = 4.0;
 
@@ -3773,6 +3981,8 @@ enum OtherOutcome {
     /// A link neither downloaded nor cached: download it, then load again with the texts so far.
     Link { link: String, got: Vec<(String, Vec<u8>)> },
     Failed(String),
+    /// Past the [`SafetyLevel`]'s limits: the error, and the limit passed (`reason`).
+    Blocked { error: String, reason: String },
 }
 
 // (`Failed`'s reason: only the tests read it, [`other_status`]; it was logged.)
@@ -3784,16 +3994,22 @@ enum OtherLoad {
     Ready(Box<LoadedModel>),
     Empty,
     Failed(String),
+    /// Past the [`SafetyLevel`]'s limits ([`OtherOutcome::Blocked`]): loaded again when the level
+    /// changes ([`set_safety_level`]).
+    Blocked { error: String, reason: String },
 }
 
 struct Other {
     uuid: u128,
-    skin: OtherSkin,
+    /// Where its model comes from (a new source loads again).
+    source: OtherSource,
     load: OtherLoad,
     /// Its image's top left in [`SPRITE`], once [`place_others`] found room.
     region: Option<[u32; 2]>,
     /// When its model loaded (the [`OTHER_MIN_HOLD`] it keeps its place for).
     ready_at: Option<Instant>,
+    /// The state last applied to its engine, as received and read ([`apply_states`]).
+    applied: Option<(Vec<u8>, PlayerState)>,
 }
 
 impl Other {
@@ -3808,6 +4024,8 @@ struct Others {
     settings_read: bool,
     on: bool,
     max: usize,
+    /// The `safety` setting.
+    safety: SafetyLevel,
     /// In the order the players came.
     entries: Vec<Other>,
     /// The models in the image the game holds ([`texture_upload`]): UUID, region.
@@ -3818,17 +4036,24 @@ struct Others {
     /// same skin is not loaded (nor logged) again, unless its failure was a download's and its
     /// retry is due ([`Failure::retry`]).
     failed: Vec<Failure>,
+    /// What the server sent of each player ([`net_client_receive`]), which wins over their skin:
+    /// at most [`NET_MAX_PLAYERS`] players, the oldest going first.
+    net: Vec<(u128, NetModel)>,
+    /// The last [`NetModel::Model`]'s number: each one a new source.
+    net_seq: u64,
 }
 
 /// A model that failed to load.
 struct Failure {
     uuid: u128,
-    skin: OtherSkin,
+    source: OtherSource,
     error: String,
     /// A failed download (a network error, a timeout, an error answer): when it is loaded again,
     /// and how many tries have failed so far. `None` for a model's own fault (bad data, past a
     /// limit), which is never retried while the skin stays.
     retry: Option<(Instant, u32)>,
+    /// Past the safety level's limits: the limit passed. Forgotten when the level changes.
+    blocked: Option<String>,
 }
 
 /// How long after a failed download another player's model is tried again.
@@ -3847,20 +4072,24 @@ impl Default for Others {
             settings_read: false,
             on: true,
             max: DEFAULT_MAX_OTHERS,
+            safety: SafetyLevel::default(),
             entries: Vec::new(),
             shown: Vec::new(),
             no_room: 0,
             failed: Vec::new(),
+            net: Vec::new(),
+            net_seq: 0,
         }
     }
 }
 
 impl Others {
     /// `uuid` with `skin` failed with `error` at `now` (logged now): a failed download
-    /// (`download`) is tried again after [`OTHER_RETRY_DELAY`], [`OTHER_TRIES`] times in all.
-    fn note_failed(&mut self, uuid: u128, skin: &OtherSkin, error: &str, download: bool, now: Instant) {
+    /// (`download`) is tried again after [`OTHER_RETRY_DELAY`], [`OTHER_TRIES`] times in all; one
+    /// `blocked` by the safety level is not, until the level changes.
+    fn note_failed(&mut self, uuid: u128, source: &OtherSource, error: &str, download: bool, blocked: Option<String>, now: Instant) {
         log::warn!("{error}");
-        let i = self.failed.iter().position(|f| f.uuid == uuid && f.skin == *skin);
+        let i = self.failed.iter().position(|f| f.uuid == uuid && f.source == *source);
         let tries = i.and_then(|i| self.failed[i].retry).map_or(0, |(_, n)| n) + 1;
         if let Some(i) = i {
             self.failed.remove(i);
@@ -3868,17 +4097,18 @@ impl Others {
         if self.failed.len() >= FAILED_KEPT {
             self.failed.remove(0);
         }
-        let retry = (download && tries < OTHER_TRIES).then(|| (now + OTHER_RETRY_DELAY, tries));
-        self.failed.push(Failure { uuid, skin: skin.clone(), error: error.to_owned(), retry });
+        let retry = (download && blocked.is_none() && tries < OTHER_TRIES).then(|| (now + OTHER_RETRY_DELAY, tries));
+        self.failed.push(Failure { uuid, source: source.clone(), error: error.to_owned(), retry, blocked });
     }
 
-    /// Whether `uuid`'s model of `skin` failed and is not to be loaded at `now` (its error), or
-    /// may be loaded (`None`: it never failed, or a failed download's retry is due).
-    fn failed_now(&self, uuid: u128, skin: &OtherSkin, now: Instant) -> Option<&str> {
-        let f = self.failed.iter().find(|f| f.uuid == uuid && f.skin == *skin)?;
-        match f.retry {
-            Some((at, _)) if now >= at => None,
-            _ => Some(&f.error),
+    /// Whether `uuid`'s model of `skin` failed and is not to be loaded at `now` (its load as it
+    /// failed), or may be loaded (`None`: it never failed, or a failed download's retry is due).
+    fn failed_now(&self, uuid: u128, source: &OtherSource, now: Instant) -> Option<OtherLoad> {
+        let f = self.failed.iter().find(|f| f.uuid == uuid && f.source == *source)?;
+        match (f.retry, &f.blocked) {
+            (Some((at, _)), _) if now >= at => None,
+            (_, Some(reason)) => Some(OtherLoad::Blocked { error: f.error.clone(), reason: reason.clone() }),
+            _ => Some(OtherLoad::Failed(f.error.clone())),
         }
     }
 }
@@ -3887,17 +4117,51 @@ thread_local! {
     static OTHERS: RefCell<Others> = RefCell::new(Others::default());
 }
 
-/// The first time it is called (on this thread): the two settings, as `get` reads them.
+/// The first time it is called (on this thread): the three settings, as `get` reads them.
 pub fn restore_others_settings(get: impl Fn(&str) -> Option<String>) {
     if OTHERS.with_borrow(|o| o.settings_read) {
         return;
     }
     let (on, max) = (others_on(get(OTHERS_SETTING)), max_others(get(MAX_OTHERS_SETTING)));
+    let safety = safety_level(get(SAFETY_SETTING));
     OTHERS.with_borrow_mut(|o| {
         o.settings_read = true;
         o.on = on;
         o.max = max;
+        o.safety = safety;
     });
+}
+
+/// Sets the [`SafetyLevel`] of the other players' models. The models it blocked load again (at the
+/// next [`others_tick`]); when it is stricter in any limit, every model loads again too (one past
+/// the new limits is blocked then: it is drawn vanilla). At High none loads. Loads and downloads
+/// under way start again within the new limits.
+pub fn set_safety_level(level: SafetyLevel) {
+    let changed = OTHERS.with_borrow_mut(|o| {
+        o.settings_read = true;
+        let old = std::mem::replace(&mut o.safety, level);
+        if old == level {
+            return false;
+        }
+        o.failed.retain(|f| f.blocked.is_none());
+        let looser = level.profile().covers(&old.profile());
+        let mut changed = false;
+        o.entries.retain(|e| {
+            let keep = match e.load {
+                OtherLoad::Ready(_) => looser,
+                OtherLoad::Empty | OtherLoad::Failed(_) => true,
+                OtherLoad::Loading(_) | OtherLoad::Link { .. } | OtherLoad::Blocked { .. } => false,
+            };
+            if !keep {
+                forget_other(e, &mut changed);
+            }
+            keep
+        });
+        changed
+    });
+    if changed {
+        STATE.with_borrow_mut(recompose);
+    }
 }
 
 /// Turns the other players' models on or off (off drops them at the next [`others_tick`]).
@@ -3918,7 +4182,22 @@ pub fn set_max_others(max: usize) {
 
 /// What the settings page shows of them.
 pub fn others_view() -> OthersView {
-    OTHERS.with_borrow(|o| OthersView { on: o.on, max: o.max, loaded: o.shown.len(), no_room: o.no_room })
+    OTHERS.with_borrow(|o| {
+        let mut blocked = o.entries.iter().filter_map(|e| match &e.load {
+            OtherLoad::Blocked { reason, .. } => Some(reason),
+            _ => None,
+        });
+        let blocked_reason = blocked.next().cloned();
+        OthersView {
+            on: o.on,
+            max: o.max,
+            loaded: o.shown.len(),
+            no_room: o.no_room,
+            safety: o.safety,
+            blocked: blocked_reason.is_some() as usize + blocked.count(),
+            blocked_reason,
+        }
+    })
 }
 
 /// How many other players' models draw: those in the image the game holds. Only the tests ask
@@ -3942,7 +4221,7 @@ pub fn other_status(uuid: u128) -> Option<OtherStatus> {
             OtherLoad::Loading(_) | OtherLoad::Link { .. } => OtherStatus::Pending,
             OtherLoad::Ready(_) => OtherStatus::Loaded,
             OtherLoad::Empty => OtherStatus::None,
-            OtherLoad::Failed(e) => OtherStatus::Error(e.clone()),
+            OtherLoad::Failed(e) | OtherLoad::Blocked { error: e, .. } => OtherStatus::Error(e.clone()),
         })
     })
 }
@@ -4008,7 +4287,12 @@ pub fn others_tick(players: &[OtherPlayer], reader: &SkinReader) {
 /// [`others_tick`] at `now` (a failed download's retry is due by it).
 pub fn others_tick_at(players: &[OtherPlayer], reader: &SkinReader, now: Instant) {
     let (own, data_dir) = STATE.with_borrow(|s| (s.own.iter().filter_map(|i| i.id).collect::<Vec<_>>(), s.data_dir.clone()));
-    let changed = OTHERS.with_borrow_mut(|o| tick_others(o, players, reader, &own, data_dir.as_deref(), now));
+    let now_ms = clock_ms(now);
+    let changed = OTHERS.with_borrow_mut(|o| {
+        let changed = tick_others(o, players, reader, &own, data_dir.as_deref(), now);
+        apply_states(o, now_ms);
+        changed
+    });
     if changed {
         STATE.with_borrow_mut(recompose);
     }
@@ -4023,9 +4307,15 @@ fn tick_others(
     now: Instant,
 ) -> bool {
     let mut changed = false;
-    let on = o.on;
+    // (At High no other player's model loads.)
+    let profile = o.safety.profile();
+    let on = o.on && profile.models;
+    let link_cap = profile.link_bytes();
+    // Each player's model source: what the server sent of them, else their skin.
+    let sources: Vec<Option<OtherSource>> = players.iter().map(|p| source_of(&o.net, p)).collect();
     let wanted = |e: &Other| {
-        on && !own.contains(&e.uuid) && players.iter().any(|p| p.uuid == e.uuid && p.skin.as_ref() == Some(&e.skin))
+        on && !own.contains(&e.uuid)
+            && players.iter().zip(&sources).any(|(p, s)| p.uuid == e.uuid && s.as_ref() == Some(&e.source))
     };
     o.entries.retain(|e| {
         let keep = wanted(e);
@@ -4048,12 +4338,16 @@ fn tick_others(
             }
             JobOutcome::Other(OtherOutcome::Empty) => OtherLoad::Empty,
             JobOutcome::Other(OtherOutcome::Link { link, got }) => {
-                start_fetch_as(&other_fetch_key(&link), &link);
+                start_fetch_as(&other_fetch_key(&link, link_cap), &link);
                 OtherLoad::Link { link, got }
             }
             JobOutcome::Other(OtherOutcome::Failed(error)) => {
-                failed.push((e.uuid, e.skin.clone(), error.clone(), false));
+                failed.push((e.uuid, e.source.clone(), error.clone(), false, None));
                 OtherLoad::Failed(error)
+            }
+            JobOutcome::Other(OtherOutcome::Blocked { error, reason }) => {
+                failed.push((e.uuid, e.source.clone(), error.clone(), false, Some(reason.clone())));
+                OtherLoad::Blocked { error, reason }
             }
             _ => OtherLoad::Failed(format!("cpm: {}: the load ended wrongly", other_name(e.uuid))),
         };
@@ -4068,7 +4362,7 @@ fn tick_others(
         }
     }
     for link in links {
-        let Some(result) = take_fetch_result(&other_fetch_key(&link)) else { continue };
+        let Some(result) = take_fetch_result(&other_fetch_key(&link, link_cap)) else { continue };
         for e in &mut o.entries {
             if !matches!(&e.load, OtherLoad::Link { link: l, .. } if *l == link) {
                 continue;
@@ -4077,27 +4371,33 @@ fn tick_others(
             e.load = match &result {
                 Ok(text) => {
                     got.push((link.clone(), text.clone()));
-                    start_other_load(e.uuid, &e.skin, got, reader, data_dir)
+                    start_other_load(e.uuid, &e.source, got, reader, data_dir, profile)
                 }
                 Err(reason) => {
                     let error = gist_error(&other_name(e.uuid), &link, reason);
-                    // A download that failed is tried again later; one past the size cap is not.
-                    let download = !reason.starts_with("larger than");
-                    failed.push((e.uuid, e.skin.clone(), error.clone(), download));
-                    OtherLoad::Failed(error)
+                    // A download that failed is tried again later; one past the size cap is
+                    // blocked by the safety level.
+                    if reason.starts_with("larger than") {
+                        let blocked = over_link_cap(link_cap);
+                        failed.push((e.uuid, e.source.clone(), error.clone(), false, Some(blocked.clone())));
+                        OtherLoad::Blocked { error, reason: blocked }
+                    } else {
+                        failed.push((e.uuid, e.source.clone(), error.clone(), true, None));
+                        OtherLoad::Failed(error)
+                    }
                 }
             };
         }
     }
-    for (uuid, skin, error, download) in failed {
-        o.note_failed(uuid, &skin, &error, download, now);
+    for (uuid, source, error, download, blocked) in failed {
+        o.note_failed(uuid, &source, &error, download, blocked, now);
     }
     // Downloads no one waits for any more (their players left): their texts go.
     let waited: Vec<String> = o
         .entries
         .iter()
         .filter_map(|e| match &e.load {
-            OtherLoad::Link { link, .. } => Some(other_fetch_key(link)),
+            OtherLoad::Link { link, .. } => Some(other_fetch_key(link, link_cap)),
             _ => None,
         })
         .collect();
@@ -4144,21 +4444,21 @@ fn tick_others(
     // Who may start a load now: a failed download due again, or a new player.
     let due = |o: &Others, e: &Other| {
         matches!(e.load, OtherLoad::Failed(_))
-            && o.failed.iter().any(|f| f.uuid == e.uuid && f.skin == e.skin && f.retry.is_some_and(|(at, _)| now >= at))
+            && o.failed.iter().any(|f| f.uuid == e.uuid && f.source == e.source && f.retry.is_some_and(|(at, _)| now >= at))
     };
     let mut starts: Vec<u128> = Vec::new();
     let mut free = max.saturating_sub(o.entries.iter().filter(|e| e.holds_place()).count());
     let farthest = o.entries.iter().filter(|e| ready(e)).last().map(|e| (distance(e.uuid), e.ready_at));
     let trial_free = ready_n >= max && loads == 0;
     let mut trial_taken = false;
-    for p in players {
-        let Some(skin) = &p.skin else { continue };
+    for (p, source) in players.iter().zip(&sources) {
+        let Some(source) = source else { continue };
         if own.contains(&p.uuid) {
             continue;
         }
         let may = match o.entries.iter().find(|e| e.uuid == p.uuid) {
             Some(e) => due(o, e),
-            None => o.failed_now(p.uuid, skin, now).is_none(),
+            None => o.failed_now(p.uuid, source, now).is_none(),
         };
         if !may {
             continue;
@@ -4178,24 +4478,24 @@ fn tick_others(
     }
     for e in &mut o.entries {
         if starts.contains(&e.uuid) {
-            e.load = start_other_load(e.uuid, &e.skin, Vec::new(), reader, data_dir);
+            e.load = start_other_load(e.uuid, &e.source, Vec::new(), reader, data_dir, profile);
         }
     }
     // The new players: those starting load; one that failed this session with this skin (not
     // due again) shows the same error, loaded no more.
-    for p in players {
-        let Some(skin) = &p.skin else { continue };
+    for (p, source) in players.iter().zip(&sources) {
+        let Some(source) = source else { continue };
         if own.contains(&p.uuid) || o.entries.iter().any(|e| e.uuid == p.uuid) {
             continue;
         }
         let load = if starts.contains(&p.uuid) {
-            start_other_load(p.uuid, skin, Vec::new(), reader, data_dir)
-        } else if let Some(error) = o.failed_now(p.uuid, skin, now) {
-            OtherLoad::Failed(error.to_owned())
+            start_other_load(p.uuid, source, Vec::new(), reader, data_dir, profile)
+        } else if let Some(load) = o.failed_now(p.uuid, source, now) {
+            load
         } else {
             continue;
         };
-        o.entries.push(Other { uuid: p.uuid, skin: skin.clone(), load, region: None, ready_at: None });
+        o.entries.push(Other { uuid: p.uuid, source: source.clone(), load, region: None, ready_at: None, applied: None });
     }
     changed
 }
@@ -4215,76 +4515,125 @@ fn other_name(uuid: u128) -> String {
     format!("player {}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
-/// The download key of an other player's link `link`.
-fn other_fetch_key(link: &str) -> String {
-    format!("{OTHER_FETCH}{link}")
+/// The download key of an other player's link `link`, at most `cap` bytes (the safety level's:
+/// [`fetch_limit`] reads it back on the download's thread): `others|<cap>|<link>`.
+fn other_fetch_key(link: &str, cap: usize) -> String {
+    format!("{OTHER_FETCH}{cap}|{link}")
 }
 
 /// The most bytes the download known as `key` ([`take_fetch_requests`]) may take: an other
-/// player's link [`OTHER_MAX_LINK_BYTES`], the local player's 16 MiB. gist_fetch.rs stops there.
+/// player's link the cap in its key (the [`SafetyLevel`]'s, [`OTHER_MAX_LINK_BYTES`] when the key
+/// has none), the local player's 16 MiB. gist_fetch.rs stops there.
 pub fn fetch_limit(key: &str) -> u64 {
-    if key.starts_with(OTHER_FETCH) { OTHER_MAX_LINK_BYTES as u64 } else { LOCAL_MAX_LINK_BYTES }
+    match key.strip_prefix(OTHER_FETCH) {
+        Some(rest) => rest
+            .split_once('|')
+            .and_then(|(cap, _)| cap.parse::<u64>().ok())
+            .map_or(OTHER_MAX_LINK_BYTES as u64, |cap| cap.min(LOCAL_MAX_LINK_BYTES)),
+        None => LOCAL_MAX_LINK_BYTES,
+    }
 }
 
-/// `link text over 100 KiB`.
-fn over_link_cap() -> String {
-    format!("link text over {} KiB", OTHER_MAX_LINK_BYTES / 1024)
+/// `link text over 100 KiB` (a cap of `cap` bytes).
+fn over_link_cap(cap: usize) -> String {
+    format!("link text over {}", size_name(cap))
 }
 
-/// Starts loading `skin`'s model on a thread of its own, with the link texts `got` so far.
-fn start_other_load(uuid: u128, skin: &OtherSkin, got: Vec<(String, Vec<u8>)>, reader: &SkinReader, data_dir: Option<&Path>) -> OtherLoad {
+/// `100 KiB`, `1 MiB`.
+fn size_name(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 { format!("{} MiB", bytes / (1024 * 1024)) } else { format!("{} KiB", bytes / 1024) }
+}
+
+/// Starts loading `source`'s model on a thread of its own, with the link texts `got` so far,
+/// within `profile`'s limits.
+fn start_other_load(
+    uuid: u128,
+    source: &OtherSource,
+    got: Vec<(String, Vec<u8>)>,
+    reader: &SkinReader,
+    data_dir: Option<&Path>,
+    profile: SafetyProfile,
+) -> OtherLoad {
     let job = next_job();
-    let file = (reader.file)(&skin.location);
-    let (slim, texture, data_dir) = (skin.slim, reader.texture, data_dir.map(Path::to_path_buf));
+    let input = match source {
+        OtherSource::Skin(skin) => OtherInput::Skin { file: (reader.file)(&skin.location), slim: skin.slim },
+        OtherSource::Net { data, skin, .. } => {
+            OtherInput::Net { data: data.clone(), skin_file: skin.as_ref().map(|k| (reader.file)(&k.location)) }
+        }
+    };
+    let (texture, data_dir) = (reader.texture, data_dir.map(Path::to_path_buf));
     spawn_named_job(
         "others",
         job,
-        move || JobOutcome::Other(load_other(uuid, &file, slim, texture, got, data_dir.as_deref())),
+        move || JobOutcome::Other(load_other(uuid, input, texture, got, data_dir.as_deref(), profile)),
         || JobOutcome::Other(OtherOutcome::Failed("cpm: another player's model: its load crashed".to_owned())),
     );
     OtherLoad::Loading(job)
 }
 
-/// `model data over 1 MiB`.
-fn over_cap() -> String {
-    format!("model data over {} MiB", OTHER_MAX_MODEL_BYTES / (1024 * 1024))
+/// `model data over 1 MiB` (a cap of `cap` bytes).
+fn over_cap(cap: usize) -> String {
+    format!("model data over {}", size_name(cap))
 }
 
-/// On a loading thread: the model in the skin `file` (`ModelDefinitionLoader.loadModel(Image,
-/// Player)`, the slim or wide channel per `slim`), its links from `got` or the link cache (a link
-/// in neither: [`OtherOutcome::Link`]), drawn with the skin (`texture`) when it has no texture of
-/// its own, within CPM's limits for other players. The texts downloaded are cached once it loads.
+/// What a loading thread reads another player's model from.
+enum OtherInput {
+    /// Their skin file, the slim or wide channel per `slim`.
+    Skin { file: PathBuf, slim: bool },
+    /// The `.cpmmodel` the server sent of them, and their skin file (drawn with when the model has
+    /// no texture of its own).
+    Net { data: std::sync::Arc<Vec<u8>>, skin_file: Option<PathBuf> },
+}
+
+/// On a loading thread: the model in the skin file (`ModelDefinitionLoader.loadModel(Image,
+/// Player)`, the slim or wide channel per `slim`) or the one the server sent, its links from `got`
+/// or the link cache (a link in neither: [`OtherOutcome::Link`]), drawn with the skin (`texture`)
+/// when it has no texture of its own, within the [`SafetyLevel`]'s limits (`profile`; past them:
+/// [`OtherOutcome::Blocked`]). The texts downloaded are cached once it loads.
 fn load_other(
     uuid: u128,
-    file: &Path,
-    slim: bool,
+    input: OtherInput,
     texture: fn(&[u8]) -> Option<([u32; 2], Vec<u8>)>,
     got: Vec<(String, Vec<u8>)>,
     data_dir: Option<&Path>,
+    profile: SafetyProfile,
 ) -> OtherOutcome {
     let name = other_name(uuid);
     let fail = |e: String| OtherOutcome::Failed(format!("cpm: {name}: {e}"));
-    let png = match std::fs::read(file) {
-        Ok(png) => png,
-        Err(e) => return fail(format!("cannot read the skin {}: {e}", file.display())),
+    let block = |reason: String| OtherOutcome::Blocked { error: format!("cpm: {name}: {reason}"), reason };
+    let (link_cap, model_cap) = (profile.link_bytes(), profile.max_model_bytes);
+    let (bytes, png) = match input {
+        OtherInput::Skin { file, slim } => {
+            let png = match std::fs::read(&file) {
+                Ok(png) => png,
+                Err(e) => return fail(format!("cannot read the skin {}: {e}", file.display())),
+            };
+            let img = match cpm_core::skin::Image::decode(&png) {
+                Ok(img) => img,
+                Err(e) => return fail(format!("cannot read the skin: {e}")),
+            };
+            let ty = if slim { cpm_core::format::SkinType::Slim } else { cpm_core::format::SkinType::Default };
+            let data = match cpm_core::skin::read_skin_data(&img, ty) {
+                Ok(Some(data)) => data,
+                Ok(None) => return OtherOutcome::Empty,
+                Err(e) => return fail(e.to_string()),
+            };
+            (cpm_core::skin::container(&data), Some(png))
+        }
+        OtherInput::Net { data, skin_file } => {
+            // (The receiver checked this already; a model is never taken past it.)
+            if data.len() > SYNC_MAX_INLINE {
+                return fail(format!("a model over {} KiB", SYNC_MAX_INLINE / 1024));
+            }
+            (data.to_vec(), skin_file.and_then(|f| std::fs::read(f).ok()))
+        }
     };
-    let img = match cpm_core::skin::Image::decode(&png) {
-        Ok(img) => img,
-        Err(e) => return fail(format!("cannot read the skin: {e}")),
-    };
-    let ty = if slim { cpm_core::format::SkinType::Slim } else { cpm_core::format::SkinType::Default };
-    let data = match cpm_core::skin::read_skin_data(&img, ty) {
-        Ok(Some(data)) => data,
-        Ok(None) => return OtherOutcome::Empty,
-        Err(e) => return fail(e.to_string()),
-    };
-    let bytes = cpm_core::skin::container(&data);
-    if got.iter().any(|(_, t)| t.len() > OTHER_MAX_LINK_BYTES) {
-        return fail(over_link_cap());
+    if got.iter().any(|(_, t)| t.len() > link_cap) {
+        return block(over_link_cap(link_cap));
     }
     let total = std::cell::Cell::new(bytes.len() + got.iter().map(|(_, t)| t.len()).sum::<usize>());
-    if total.get() > OTHER_MAX_MODEL_BYTES {
-        return fail(over_cap());
+    if total.get() > model_cap {
+        return block(over_cap(model_cap));
     }
     let read_caches = RefCell::new(Vec::<PathBuf>::new());
     let last = RefCell::new(String::new());
@@ -4299,11 +4648,11 @@ fn load_other(
         if let Some(cache) = cache {
             let len = std::fs::metadata(&cache).map_or(0, |m| m.len() as usize);
             // (A link the local player cached may be bigger than another player's may be.)
-            if len > OTHER_MAX_LINK_BYTES {
-                return Err(cpm_core::CpmError::Limit(over_link_cap()));
+            if len > link_cap {
+                return Err(cpm_core::CpmError::Limit(over_link_cap(link_cap)));
             }
-            if total.get().saturating_add(len) > OTHER_MAX_MODEL_BYTES {
-                return Err(cpm_core::CpmError::Limit(over_cap()));
+            if total.get().saturating_add(len) > model_cap {
+                return Err(cpm_core::CpmError::Limit(over_cap(model_cap)));
             }
             total.set(total.get() + len);
             let t = std::fs::read(&cache).map_err(|e| cpm_core::CpmError::Invalid(format!("cannot read the cache: {e}")));
@@ -4314,13 +4663,13 @@ fn load_other(
         Err(cpm_core::CpmError::NeedsLink(link.to_owned()))
     };
     // CPM's limits are checked before any texture is decoded (from the PNG headers).
-    let result = cpm_core::link::load_with_links_limited(&bytes, &text, &OTHER_LIMITS);
+    let result = cpm_core::link::load_with_links_limited(&bytes, &text, &profile.limits());
     let (last, missing) = (last.into_inner(), missing.into_inner());
     match result {
         Ok(mut model) => {
             // Without a texture of its own it draws with the skin (`ModelDefinition`).
             if model.texture_rgba.is_empty()
-                && let Some((size, rgba)) = texture(&png)
+                && let Some((size, rgba)) = png.as_deref().and_then(texture)
             {
                 cpm_core::skin::use_skin_texture(&mut model, size, rgba);
             }
@@ -4337,14 +4686,19 @@ fn load_other(
             OtherOutcome::Ready(Box::new(model))
         }
         Err(cpm_core::CpmError::NeedsLink(link)) if missing.as_deref() == Some(link.as_str()) => OtherOutcome::Link { link, got },
+        // Past a limit: blocked by the safety level.
+        Err(cpm_core::CpmError::Limit(reason)) if last.is_empty() => block(reason),
+        Err(cpm_core::CpmError::Limit(reason)) => {
+            // (A cached text past a limit is kept: a higher level loads it.)
+            let error = gist_error(&name, &last, &reason);
+            OtherOutcome::Blocked { error, reason }
+        }
         Err(e) if last.is_empty() => fail(e.to_string()),
         Err(e) => {
             // A cached text that does not load is downloaded afresh next time (as the local
-            // player's are); one past a limit is kept.
-            if !matches!(e, cpm_core::CpmError::Limit(_)) {
-                for cache in read_caches.into_inner() {
-                    let _ = std::fs::remove_file(cache);
-                }
+            // player's are).
+            for cache in read_caches.into_inner() {
+                let _ = std::fs::remove_file(cache);
             }
             OtherOutcome::Failed(gist_error(&name, &last, e))
         }
@@ -4434,4 +4788,1316 @@ fn free_spot([w, h]: [u32; 2], taken: &[[u32; 4]]) -> Option<[u32; 2]> {
         }
     }
     best.map(|(_, at)| at)
+}
+
+// ---- Models shared in Horizon-hosted worlds (multiplayer phase 2): Horizon's mod messages
+// (`horizon:mod_net`, docs/native-mods.md "Mod messages") carry them between the mod's client half
+// (every player with the mod) and its server half (the host: an integrated server, Open to LAN, or a
+// Horizon server) on the channel [`SYNC_CHANNEL`]. Each client sends its chosen model ([`SharePlan`]);
+// the host keeps the latest of each player and relays it to every other player with the mod
+// ([`Relay`]); what a client receives feeds the others registry as a source that wins over the skin
+// ([`net_client_receive`]). The messages ([`SyncMessage`]) are versioned and split into chunks
+// within Horizon's 30 000 bytes ([`encode_sync`], [`Reassembly`]). net.rs is the edge to the game. ----
+
+/// The mod message channel (`mod_id:name`).
+pub const SYNC_CHANNEL: &str = "cpm:sync";
+/// The messages' version: the first byte of each frame. A frame of another version is not read.
+pub const SYNC_VERSION: u8 = 1;
+/// The most bytes of one mod message (`horizon_protocol::mod_net::MAX_DATA`).
+pub const SYNC_MAX_FRAME: usize = 30_000;
+/// The most bytes of a model sent inline: [`GIST_LIMIT_KIB`] (a bigger one needs a link model).
+pub const SYNC_MAX_INLINE: usize = GIST_LIMIT_KIB as usize * 1024;
+/// The most bytes of a link model's own data sent ([`ModelKind::Link`]).
+pub const SYNC_MAX_LINK: usize = 1024;
+/// The most bytes of a [`SyncMessage::State`].
+pub const SYNC_MAX_STATE: usize = 1024;
+/// A frame's head: the version, the kind, the player's UUID (big-endian).
+const SYNC_HEAD: usize = 18;
+/// A chunk's head: [`SYNC_HEAD`], then its index and the chunk count.
+const SYNC_CHUNK_HEAD: usize = SYNC_HEAD + 2;
+/// The largest message (before chunking): a model at [`SYNC_MAX_INLINE`].
+const SYNC_MAX_MESSAGE: usize = SYNC_HEAD + 1 + SYNC_MAX_INLINE;
+/// The most chunks one message takes.
+pub const SYNC_MAX_CHUNKS: usize = SYNC_MAX_MESSAGE.div_ceil(SYNC_MAX_FRAME - SYNC_CHUNK_HEAD);
+const TAG_MODEL: u8 = 0;
+const TAG_CLEAR: u8 = 1;
+const TAG_STATE: u8 = 2;
+const TAG_CHUNK: u8 = 3;
+const TAG_UNSET: u8 = 4;
+const TAG_HAVE: u8 = 5;
+const TAG_NEED: u8 = 6;
+
+/// How a [`SyncMessage::Model`] holds the model: it sets the size cap the host applies. Receivers
+/// load either the same way (a link in the data downloads whatever the kind says).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKind {
+    /// The `.cpmmodel` itself, at most [`SYNC_MAX_INLINE`].
+    Inline,
+    /// A link model's `.cpmmodel` (its data names a link, as `git:user/id`), at most
+    /// [`SYNC_MAX_LINK`]: the receiver downloads the link.
+    Link,
+}
+
+/// One `cpm:sync` message. A client's own carry any UUID: the host relays them as the sender's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncMessage {
+    /// The player's chosen model, exactly as loaded.
+    Model { uuid: u128, kind: ModelKind, data: Vec<u8> },
+    /// The player chose to draw vanilla (nothing chosen, or the mod off): a model in their skin
+    /// is hidden too, as CPM hides it.
+    Clear { uuid: u128 },
+    /// Nothing is sent for the player (their model is too big to send or did not load, or they
+    /// left): the receiver forgets what it had of them, and their skin's model draws again.
+    Unset { uuid: u128 },
+    /// The player's gesture, pose and parameter values ([`PlayerState`], [`encode_state`]).
+    State { uuid: u128, data: Vec<u8> },
+    /// A few bytes every few seconds instead of the model again: the [`model_digest`] of the
+    /// player's model message and their state ([`encode_state`]; empty: none). From a client, the
+    /// host asks for the model ([`SyncMessage::Need`]) when it holds another; relayed by the host
+    /// (with the digest of the model it holds), a player holding another model of them asks for it.
+    Have { uuid: u128, digest: u64, state: Vec<u8> },
+    /// "Send me the whole model": from the host, the client's own; from a client, `uuid`'s, which
+    /// the host sends that client only (within [`RELAY_NEED_RELAYS`]).
+    Need { uuid: u128 },
+}
+
+impl SyncMessage {
+    pub fn uuid(&self) -> u128 {
+        match self {
+            SyncMessage::Model { uuid, .. }
+            | SyncMessage::Clear { uuid }
+            | SyncMessage::Unset { uuid }
+            | SyncMessage::State { uuid, .. }
+            | SyncMessage::Have { uuid, .. }
+            | SyncMessage::Need { uuid } => *uuid,
+        }
+    }
+
+    /// The message as `to`'s.
+    fn with_uuid(mut self, to: u128) -> Self {
+        match &mut self {
+            SyncMessage::Model { uuid, .. }
+            | SyncMessage::Clear { uuid }
+            | SyncMessage::Unset { uuid }
+            | SyncMessage::State { uuid, .. }
+            | SyncMessage::Have { uuid, .. }
+            | SyncMessage::Need { uuid } => *uuid = to,
+        }
+        self
+    }
+
+    /// Within the caps: a model at most [`SYNC_MAX_INLINE`] inline or [`SYNC_MAX_LINK`] as a link
+    /// (and not empty), a state at most [`SYNC_MAX_STATE`].
+    pub fn check(&self) -> Result<(), String> {
+        match self {
+            SyncMessage::Model { data, .. } if data.is_empty() => Err("an empty model".into()),
+            SyncMessage::Model { kind: ModelKind::Inline, data, .. } if data.len() > SYNC_MAX_INLINE => {
+                Err(format!("a model over {} KiB", SYNC_MAX_INLINE / 1024))
+            }
+            SyncMessage::Model { kind: ModelKind::Link, data, .. } if data.len() > SYNC_MAX_LINK => {
+                Err(format!("a link model over {SYNC_MAX_LINK} bytes"))
+            }
+            SyncMessage::State { data, .. } | SyncMessage::Have { state: data, .. } if data.len() > SYNC_MAX_STATE => {
+                Err(format!("a state over {SYNC_MAX_STATE} bytes"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+fn sync_head(tag: u8, uuid: u128) -> Vec<u8> {
+    let mut out = Vec::with_capacity(SYNC_HEAD);
+    out.push(SYNC_VERSION);
+    out.push(tag);
+    out.extend(uuid.to_be_bytes());
+    out
+}
+
+/// `m` as one message's bytes (before chunking).
+fn encode_whole(m: &SyncMessage) -> Vec<u8> {
+    match m {
+        SyncMessage::Model { uuid, kind, data } => {
+            let mut out = sync_head(TAG_MODEL, *uuid);
+            out.push(match kind {
+                ModelKind::Inline => 0,
+                ModelKind::Link => 1,
+            });
+            out.extend(data);
+            out
+        }
+        SyncMessage::Clear { uuid } => sync_head(TAG_CLEAR, *uuid),
+        SyncMessage::Unset { uuid } => sync_head(TAG_UNSET, *uuid),
+        SyncMessage::State { uuid, data } => {
+            let mut out = sync_head(TAG_STATE, *uuid);
+            out.extend(data);
+            out
+        }
+        SyncMessage::Have { uuid, digest, state } => {
+            let mut out = sync_head(TAG_HAVE, *uuid);
+            out.extend(digest.to_be_bytes());
+            out.extend(state);
+            out
+        }
+        SyncMessage::Need { uuid } => sync_head(TAG_NEED, *uuid),
+    }
+}
+
+/// FNV-1a, 64 bits.
+fn fnv64(parts: &[&[u8]]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for &b in *part {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
+}
+
+/// What names a model message (a [`SyncMessage::Model`]'s kind and bytes, or a Clear, or an
+/// Unset) in a [`SyncMessage::Have`] and a [`PlayerState`]: a 64-bit hash, whatever the UUID.
+pub fn model_digest(m: &SyncMessage) -> u64 {
+    match m {
+        SyncMessage::Model { kind, data, .. } => fnv64(&[&[TAG_MODEL, *kind as u8], data]),
+        SyncMessage::Clear { .. } => fnv64(&[&[TAG_CLEAR]]),
+        _ => fnv64(&[&[TAG_UNSET]]),
+    }
+}
+
+/// The frames that send `m`, each at most [`SYNC_MAX_FRAME`]: the message itself, or its chunks
+/// (at most [`SYNC_MAX_CHUNKS`] for a message within the caps), in order.
+pub fn encode_sync(m: &SyncMessage) -> Vec<Vec<u8>> {
+    let whole = encode_whole(m);
+    if whole.len() <= SYNC_MAX_FRAME {
+        return vec![whole];
+    }
+    let pieces: Vec<&[u8]> = whole.chunks(SYNC_MAX_FRAME - SYNC_CHUNK_HEAD).collect();
+    let count = pieces.len().min(u8::MAX as usize) as u8;
+    pieces
+        .iter()
+        .enumerate()
+        .map(|(i, piece)| {
+            let mut out = sync_head(TAG_CHUNK, m.uuid());
+            out.push(i as u8);
+            out.push(count);
+            out.extend(*piece);
+            out
+        })
+        .collect()
+}
+
+/// A frame's UUID, once its length and version are right.
+fn frame_head(frame: &[u8]) -> Result<u128, String> {
+    if frame.len() < SYNC_HEAD {
+        return Err("a frame too short".into());
+    }
+    if frame[0] != SYNC_VERSION {
+        return Err(format!("a frame of version {}", frame[0]));
+    }
+    Ok(u128::from_be_bytes(frame[2..SYNC_HEAD].try_into().expect("16 bytes")))
+}
+
+/// One message's bytes ([`encode_whole`]).
+fn decode_whole(b: &[u8]) -> Result<SyncMessage, String> {
+    let uuid = frame_head(b)?;
+    let rest = &b[SYNC_HEAD..];
+    match b[1] {
+        TAG_MODEL => {
+            let kind = match rest.first() {
+                Some(0) => ModelKind::Inline,
+                Some(1) => ModelKind::Link,
+                _ => return Err("a model of no known kind".into()),
+            };
+            Ok(SyncMessage::Model { uuid, kind, data: rest[1..].to_vec() })
+        }
+        TAG_CLEAR if rest.is_empty() => Ok(SyncMessage::Clear { uuid }),
+        TAG_UNSET if rest.is_empty() => Ok(SyncMessage::Unset { uuid }),
+        TAG_STATE => Ok(SyncMessage::State { uuid, data: rest.to_vec() }),
+        TAG_HAVE if rest.len() >= 8 => Ok(SyncMessage::Have {
+            uuid,
+            digest: u64::from_be_bytes(rest[..8].try_into().expect("8 bytes")),
+            state: rest[8..].to_vec(),
+        }),
+        TAG_NEED if rest.is_empty() => Ok(SyncMessage::Need { uuid }),
+        t => Err(format!("a message of no known kind {t}")),
+    }
+}
+
+/// A message coming in chunks, from one sender.
+struct Partial {
+    key: u128,
+    count: u8,
+    next: u8,
+    bytes: Vec<u8>,
+}
+
+/// Puts chunked messages back together, one at a time per sender (a new first chunk starts over),
+/// in order, within [`SYNC_MAX_CHUNKS`] and [`SYNC_MAX_MESSAGE`] bytes; at most `max` senders at
+/// once, the oldest dropped past that. Messages are untrusted: anything off drops the transfer.
+pub struct Reassembly {
+    max: usize,
+    partials: Vec<Partial>,
+}
+
+impl Reassembly {
+    pub fn new(max: usize) -> Self {
+        Reassembly { max: max.max(1), partials: Vec::new() }
+    }
+
+    /// How many transfers are under way. Only the tests ask.
+    #[allow(dead_code)]
+    pub fn partials(&self) -> usize {
+        self.partials.len()
+    }
+
+    /// Drops `key`'s transfer.
+    pub fn forget(&mut self, key: u128) {
+        self.partials.retain(|p| p.key != key);
+    }
+
+    /// Takes a frame from `sender` (`None`: the frame's own UUID names the sender, as in the
+    /// server's relayed frames): the whole message once it has come, `None` while chunks are missing.
+    pub fn push(&mut self, sender: Option<u128>, frame: &[u8]) -> Result<Option<SyncMessage>, String> {
+        let uuid = frame_head(frame)?;
+        if frame[1] != TAG_CHUNK {
+            return decode_whole(frame).map(Some);
+        }
+        let key = sender.unwrap_or(uuid);
+        if frame.len() < SYNC_CHUNK_HEAD {
+            self.forget(key);
+            return Err("a chunk too short".into());
+        }
+        let (index, count, piece) = (frame[SYNC_HEAD], frame[SYNC_HEAD + 1], &frame[SYNC_CHUNK_HEAD..]);
+        if count < 2 || count as usize > SYNC_MAX_CHUNKS || index >= count {
+            self.forget(key);
+            return Err(format!("a chunk {index} of {count}"));
+        }
+        if index == 0 {
+            self.forget(key);
+            if self.partials.len() >= self.max {
+                self.partials.remove(0);
+            }
+            self.partials.push(Partial { key, count, next: 1, bytes: piece.to_vec() });
+            return Ok(None);
+        }
+        let Some(i) = self.partials.iter().position(|p| p.key == key) else {
+            return Err(format!("a chunk {index} without its first"));
+        };
+        let p = &mut self.partials[i];
+        if p.count != count || p.next != index || p.bytes.len() + piece.len() > SYNC_MAX_MESSAGE {
+            self.partials.remove(i);
+            return Err(format!("a chunk {index} of {count} out of turn"));
+        }
+        p.bytes.extend(piece);
+        p.next += 1;
+        if p.next < count {
+            return Ok(None);
+        }
+        let p = self.partials.remove(i);
+        let m = decode_whole(&p.bytes)?;
+        if m.uuid() != uuid {
+            return Err("chunks of another player's message".into());
+        }
+        Ok(Some(m))
+    }
+}
+
+// The host's relay.
+
+/// The most frames the relay sends a player a tick: under Horizon's 32 (`PER_TICK`), which the
+/// other mods share.
+pub const RELAY_SEND_PER_TICK: usize = 24;
+/// The most model changes ([`SyncMessage::Model`], [`SyncMessage::Clear`]) of a player relayed in
+/// [`RELAY_MODEL_WINDOW`]; the latest of those past it goes once the window allows.
+pub const RELAY_MODEL_RELAYS: usize = 4;
+pub const RELAY_MODEL_WINDOW: Duration = Duration::from_secs(10);
+/// The same for states.
+pub const RELAY_STATE_RELAYS: usize = 20;
+pub const RELAY_STATE_WINDOW: Duration = Duration::from_secs(1);
+/// The most players the relay keeps.
+pub const RELAY_MAX_PLAYERS: usize = 1024;
+/// The host asks a player for their whole model ([`SyncMessage::Need`]) at most once in this.
+pub const RELAY_ASK_WINDOW: Duration = Duration::from_secs(5);
+/// A player's [`SyncMessage::Have`] is relayed to the others at most once in this.
+pub const RELAY_HAVE_WINDOW: Duration = Duration::from_secs(2);
+/// The most models a player's [`SyncMessage::Need`]s get them in [`RELAY_NEED_WINDOW`] (so asking
+/// cannot make the host send much); the others are ignored (they ask again).
+pub const RELAY_NEED_RELAYS: usize = 4;
+pub const RELAY_NEED_WINDOW: Duration = Duration::from_secs(10);
+
+/// What of a source player a recipient is to be sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Model,
+    State,
+    /// Their [`SyncMessage::Have`], with the digest of the model held of them.
+    Have,
+    /// The source left: a [`SyncMessage::Unset`].
+    Gone,
+}
+
+/// A relay's rate: when its last relays went.
+#[derive(Default)]
+struct Rate(std::collections::VecDeque<Instant>);
+
+impl Rate {
+    /// Whether one more may go at `now` (`limit` in `window`); it is counted when it may.
+    fn take(&mut self, now: Instant, limit: usize, window: Duration) -> bool {
+        while self.0.front().is_some_and(|t| now.saturating_duration_since(*t) >= window) {
+            self.0.pop_front();
+        }
+        if self.0.len() >= limit {
+            return false;
+        }
+        self.0.push_back(now);
+        true
+    }
+}
+
+struct RelayPlayer {
+    uuid: u128,
+    /// They sent a `cpm:sync` frame (any, even one that did not read): they have the mod, and are
+    /// sent the others'.
+    peer: bool,
+    /// Their latest model ([`SyncMessage::Model`] or [`SyncMessage::Clear`]) and state.
+    model: Option<SyncMessage>,
+    state: Option<SyncMessage>,
+    /// A change not relayed yet (the rate held it).
+    model_due: bool,
+    state_due: bool,
+    model_rate: Rate,
+    state_rate: Rate,
+    /// The host asked them for their model ([`RELAY_ASK_WINDOW`]), relayed their Have
+    /// ([`RELAY_HAVE_WINDOW`]), sent them a model they asked for ([`RELAY_NEED_RELAYS`]).
+    ask_rate: Rate,
+    have_rate: Rate,
+    need_rate: Rate,
+    /// A [`SyncMessage::Need`] for their own model is to be sent them.
+    need_due: bool,
+    /// What they are to be sent: (source, part), each once.
+    queue: std::collections::VecDeque<(u128, Part)>,
+    /// The frames of the message being sent them.
+    frames: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl RelayPlayer {
+    fn new(uuid: u128) -> Self {
+        RelayPlayer {
+            uuid,
+            peer: false,
+            model: None,
+            state: None,
+            model_due: false,
+            state_due: false,
+            model_rate: Rate::default(),
+            state_rate: Rate::default(),
+            ask_rate: Rate::default(),
+            have_rate: Rate::default(),
+            need_rate: Rate::default(),
+            need_due: false,
+            queue: Default::default(),
+            frames: Default::default(),
+        }
+    }
+
+    fn enqueue(&mut self, source: u128, part: Part) {
+        if source != self.uuid && !self.queue.contains(&(source, part)) {
+            self.queue.push_back((source, part));
+        }
+    }
+}
+
+/// The server half's state machine: the latest model and state of each player, relayed to every
+/// other player with the mod (never back to the sender), all of it to a player once they first
+/// speak (a late joiner), dropped when they leave; within the caps on size
+/// ([`SyncMessage::check`]), rate ([`RELAY_MODEL_RELAYS`], [`RELAY_STATE_RELAYS`]), chunks
+/// ([`Reassembly`], one transfer per sender) and sends a tick ([`RELAY_SEND_PER_TICK`]). The host is
+/// a player like the others.
+pub struct Relay {
+    players: Vec<RelayPlayer>,
+    assembly: Reassembly,
+}
+
+impl Default for Relay {
+    fn default() -> Self {
+        Relay { players: Vec::new(), assembly: Reassembly::new(RELAY_MAX_PLAYERS) }
+    }
+}
+
+impl Relay {
+    fn index(&mut self, uuid: u128) -> Option<usize> {
+        if let Some(i) = self.players.iter().position(|p| p.uuid == uuid) {
+            return Some(i);
+        }
+        if self.players.len() >= RELAY_MAX_PLAYERS {
+            log::warn!("cpm: more than {RELAY_MAX_PLAYERS} players: {} is not relayed", other_name(uuid));
+            return None;
+        }
+        self.players.push(RelayPlayer::new(uuid));
+        Some(self.players.len() - 1)
+    }
+
+    /// `uuid` joined the server (anything kept of them before goes).
+    pub fn joined(&mut self, uuid: u128) {
+        self.left(uuid);
+        self.index(uuid);
+    }
+
+    /// `uuid` left: dropped, and the players with the mod are sent an Unset for them.
+    pub fn left(&mut self, uuid: u128) {
+        let Some(i) = self.players.iter().position(|p| p.uuid == uuid) else { return };
+        let was_peer = self.players.remove(i).peer;
+        self.assembly.forget(uuid);
+        for q in &mut self.players {
+            q.queue.retain(|(source, _)| *source != uuid);
+            if was_peer && q.peer {
+                q.enqueue(uuid, Part::Gone);
+            }
+        }
+    }
+
+    /// Their latest model (or Clear). Only the tests ask.
+    #[allow(dead_code)]
+    pub fn model_of(&self, uuid: u128) -> Option<&SyncMessage> {
+        self.players.iter().find(|p| p.uuid == uuid)?.model.as_ref()
+    }
+
+    /// A frame from `from`'s client (a player [`Relay::joined`]; anyone else is ignored, as a
+    /// message that comes after its player left): once a whole message within the caps has come,
+    /// it is kept as `from`'s (whatever UUID it names) and due to be relayed when it changed. The
+    /// first frame, even one that does not read (a lost chunk, another version), makes `from` a
+    /// player with the mod, who is then sent everything held.
+    pub fn receive(&mut self, from: u128, frame: &[u8], now: Instant) {
+        let Some(i) = self.players.iter().position(|p| p.uuid == from) else {
+            return log::debug!("cpm: {}: a message from a player not on the server", other_name(from));
+        };
+        if !self.players[i].peer {
+            self.players[i].peer = true;
+            let held: Vec<(u128, Part)> = self
+                .players
+                .iter()
+                .filter(|q| q.uuid != from && q.peer)
+                .flat_map(|q| {
+                    let model = q.model.is_some().then_some((q.uuid, Part::Model));
+                    let state = q.state.is_some().then_some((q.uuid, Part::State));
+                    model.into_iter().chain(state)
+                })
+                .collect();
+            let p = &mut self.players[i];
+            for (source, part) in held {
+                p.enqueue(source, part);
+            }
+        }
+        let m = match self.assembly.push(Some(from), frame) {
+            // A Need names whose model is wanted: sent to the asker only, within its rate.
+            Ok(Some(SyncMessage::Need { uuid: target })) => return self.need(i, target, now),
+            Ok(Some(m)) => m.with_uuid(from),
+            Ok(None) => return,
+            Err(e) => return log::debug!("cpm: {}: a bad message: {e}", other_name(from)),
+        };
+        if let Err(e) = m.check() {
+            return log::debug!("cpm: {}: a message refused: {e}", other_name(from));
+        }
+        let p = &mut self.players[i];
+        match m {
+            SyncMessage::Have { digest, state, .. } => {
+                // Another model held (a change lost, or none yet): ask for it, now and then.
+                let held = p.model.as_ref().map(model_digest);
+                if held != Some(digest) {
+                    if p.ask_rate.take(now, 1, RELAY_ASK_WINDOW) {
+                        p.need_due = true;
+                    }
+                    return;
+                }
+                // Its state heals a lost State.
+                if !state.is_empty() {
+                    let m = SyncMessage::State { uuid: from, data: state };
+                    if p.state.as_ref() != Some(&m) {
+                        p.state = Some(m);
+                        p.state_due = true;
+                    }
+                }
+                // The others check theirs against it (the digest alone: they have the state). Not
+                // while a change is held back by the rate: they would all ask for it.
+                if !p.model_due && p.have_rate.take(now, 1, RELAY_HAVE_WINDOW) {
+                    for q in self.players.iter_mut().filter(|q| q.peer) {
+                        q.enqueue(from, Part::Have);
+                    }
+                }
+            }
+            SyncMessage::Need { .. } => {}
+            SyncMessage::State { .. } => {
+                if p.state.as_ref() != Some(&m) {
+                    p.state = Some(m);
+                    p.state_due = true;
+                }
+            }
+            // (An unchanged one, as a model sent again on a Need, is not relayed again.)
+            _ => {
+                if p.model.as_ref() != Some(&m) {
+                    p.model = Some(m);
+                    p.model_due = true;
+                }
+            }
+        }
+    }
+
+    /// Player `i` asks for `target`'s model: queued for them when it is held, within
+    /// [`RELAY_NEED_RELAYS`].
+    fn need(&mut self, i: usize, target: u128, now: Instant) {
+        // (A change the rate holds back goes in its time: not early.)
+        let held = self.players.iter().any(|p| p.uuid == target && p.peer && p.model.is_some() && !p.model_due);
+        let p = &mut self.players[i];
+        if held && target != p.uuid && p.need_rate.take(now, RELAY_NEED_RELAYS, RELAY_NEED_WINDOW) {
+            p.enqueue(target, Part::Model);
+        }
+    }
+
+    /// Once a tick: the changes the rate lets through are queued for the other players with the
+    /// mod, then each player is sent what is queued for them, [`RELAY_SEND_PER_TICK`] frames at
+    /// most. `send(to, frame)` false (the player's allowance is taken): the frame waits for the
+    /// next tick.
+    pub fn tick(&mut self, now: Instant, mut send: impl FnMut(u128, &[u8]) -> bool) {
+        let mut relays = Vec::new();
+        for p in &mut self.players {
+            if p.model_due && p.model_rate.take(now, RELAY_MODEL_RELAYS, RELAY_MODEL_WINDOW) {
+                p.model_due = false;
+                relays.push((p.uuid, Part::Model));
+            }
+            if p.state_due && p.state_rate.take(now, RELAY_STATE_RELAYS, RELAY_STATE_WINDOW) {
+                p.state_due = false;
+                relays.push((p.uuid, Part::State));
+            }
+        }
+        for q in self.players.iter_mut().filter(|q| q.peer) {
+            for (source, part) in &relays {
+                q.enqueue(*source, *part);
+            }
+        }
+        for qi in 0..self.players.len() {
+            let mut sent = 0;
+            while sent < RELAY_SEND_PER_TICK {
+                if self.players[qi].frames.is_empty() {
+                    let q = &mut self.players[qi];
+                    if std::mem::take(&mut q.need_due) {
+                        q.frames = encode_sync(&SyncMessage::Need { uuid: q.uuid }).into();
+                        continue;
+                    }
+                    let Some((source, part)) = q.queue.pop_front() else { break };
+                    let held = |p: &RelayPlayer| match part {
+                        Part::Model => p.model.clone(),
+                        Part::Have => p.model.as_ref().map(|m| SyncMessage::Have { uuid: p.uuid, digest: model_digest(m), state: Vec::new() }),
+                        _ => p.state.clone(),
+                    };
+                    let m = match part {
+                        Part::Gone => Some(SyncMessage::Unset { uuid: source }),
+                        _ => self.players.iter().find(|p| p.uuid == source).and_then(held),
+                    };
+                    if let Some(m) = m {
+                        self.players[qi].frames = encode_sync(&m).into();
+                    }
+                    continue;
+                }
+                let q = &mut self.players[qi];
+                if !send(q.uuid, q.frames.front().expect("a frame")) {
+                    break;
+                }
+                q.frames.pop_front();
+                sent += 1;
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// The server half's relay (on the server's thread: an integrated server's or a dedicated one's).
+    static RELAY: RefCell<Relay> = RefCell::new(Relay::default());
+}
+
+/// A player joined the server (net.rs, `player_logged_in`).
+pub fn relay_joined(uuid: u128) {
+    RELAY.with_borrow_mut(|r| r.joined(uuid));
+}
+
+/// A player left the server (net.rs, `player_logged_out`).
+pub fn relay_left(uuid: u128) {
+    RELAY.with_borrow_mut(|r| r.left(uuid));
+}
+
+/// A [`SYNC_CHANNEL`] message from a player's client (net.rs, `net_from_client`).
+pub fn relay_receive(from: u128, frame: &[u8], now: Instant) {
+    RELAY.with_borrow_mut(|r| r.receive(from, frame, now));
+}
+
+/// The relay's tick (net.rs, the server's `tick`): `send(to, frame)` sends a frame to a player.
+pub fn relay_tick(now: Instant, send: impl FnMut(u128, &[u8]) -> bool) {
+    RELAY.with_borrow_mut(|r| r.tick(now, send));
+}
+
+// A client's half.
+
+/// What is sent of a chosen model's file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharePlan {
+    Model(ModelKind, Vec<u8>),
+    /// Nothing chosen: a Clear.
+    Clear,
+    /// A model of this many bytes, over [`SYNC_MAX_INLINE`]: not sent (an Unset: the others see
+    /// the skin's model, or the normal skin); a link model of it can be (the gist flow makes one).
+    HeldBack(usize),
+}
+
+/// Whether `data` (a `.cpmmodel`) is a link model: its data names a link it does not hold.
+pub fn is_link_model(data: &[u8]) -> bool {
+    cpm_core::format::read_cpmmodel(data).is_ok_and(|f| f.data.link.is_some())
+}
+
+/// What the others are sent of the model file `data`: the file without its picker icon (CPM shares
+/// the model, not the picture), or the file as it is when it does not read.
+pub fn shared_bytes(data: &[u8]) -> Vec<u8> {
+    cpm_core::format::strip_icon(data).unwrap_or_else(|_| data.to_vec())
+}
+
+/// What a client sends of the model file `data` it loaded (`None`: nothing chosen): a link model's
+/// own small data as [`ModelKind::Link`], any other model of [`SYNC_MAX_INLINE`] or less inline,
+/// anything bigger held back; all without the icon ([`shared_bytes`]), sizes too.
+pub fn share_plan(data: Option<&[u8]>) -> SharePlan {
+    let Some(data) = data else { return SharePlan::Clear };
+    let data = &shared_bytes(data);
+    if data.len() > SYNC_MAX_INLINE {
+        return SharePlan::HeldBack(data.len());
+    }
+    let kind = if data.len() <= SYNC_MAX_LINK && is_link_model(data) { ModelKind::Link } else { ModelKind::Inline };
+    SharePlan::Model(kind, data.to_vec())
+}
+
+/// What the others are sent of the local player's model, for the settings page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetShare {
+    /// The mod is off: they see the vanilla player.
+    Off,
+    /// No model chosen: they see the vanilla player.
+    Nothing,
+    /// The chosen model did not load: nothing is sent, they see the skin's model if any.
+    NotLoaded,
+    /// The model, inline or as a link model.
+    Shared(ModelKind),
+    /// The model is this many bytes, too big to send ([`SharePlan::HeldBack`]): they see the skin's
+    /// model (or the normal skin) until a link model of it is chosen.
+    HeldBack(usize),
+}
+
+/// The frames a client sends a tick at most (Horizon allows 32, shared with the other mods).
+const CLIENT_SEND_PER_TICK: usize = 8;
+/// Ticks to wait after a refused send (another mod took this tick's allowance).
+const CLIENT_RETRY_TICKS: u32 = 20;
+/// The whole model is sent once (on a change, a join, a refused frame, and when asked for with a
+/// [`SyncMessage::Need`]); after that only a [`SyncMessage::Have`] goes, this often (ticks, plus up
+/// to [`CLIENT_HAVE_JITTER`]): its digest lets the host ask for a model it lost, and its state heals
+/// a lost State.
+pub const CLIENT_HAVE_TICKS: u32 = 100;
+pub const CLIENT_HAVE_JITTER: u32 = 40;
+/// Ticks between two States at least (10 a second at most: under the host's
+/// [`RELAY_STATE_RELAYS`] a second, so the host never holds one back).
+pub const CLIENT_STATE_MIN_TICKS: u32 = 2;
+/// A client asks the host for another player's model ([`SyncMessage::Need`]) at most this often
+/// (ticks, per player).
+pub const CLIENT_NEED_TICKS: u32 = 100;
+/// The most players a client keeps what the server sent of (the oldest go first).
+const NET_MAX_PLAYERS: usize = 128;
+
+/// What decides the message sent: the mod on, the loaded selection (and skin), whether it loaded,
+/// whether it waits for a link, and the load's number ([`State::share_gen`]: a file loaded again).
+type ShareKey = (bool, Option<PathBuf>, Option<String>, bool, bool, u64);
+
+struct NetClient {
+    /// [`ShareKey`] of the message last decided.
+    key: Option<ShareKey>,
+    /// The message the local player's model calls for, and its [`model_digest`].
+    current: Option<SyncMessage>,
+    digest: u64,
+    /// The server took all of `current`'s frames.
+    sent: bool,
+    /// The frames of `current` left to send.
+    frames: std::collections::VecDeque<Vec<u8>>,
+    /// The server asked for the whole model again.
+    asked: bool,
+    /// Ticks to wait before trying again.
+    wait: u32,
+    /// Ticks until the next [`SyncMessage::Have`].
+    have_in: u32,
+    /// The local state ([`encode_state`]) while the model is shared, and whether it is at rest
+    /// (nothing playing, no pose, the default parameters).
+    state: Option<(Vec<u8>, bool)>,
+    /// The state the server was last sent (`None`: none since joining).
+    state_sent: Option<Vec<u8>>,
+    /// Ticks before the next State may go.
+    state_wait: u32,
+    /// The other players whose models to ask for, and those asked for lately (ticks left).
+    needs: Vec<u128>,
+    needed: Vec<(u128, u32)>,
+    /// In a server's play state with mod messages at the last tick.
+    online: bool,
+    /// The server sent something of another player: someone else here has the mod.
+    peers: bool,
+    /// The mod was on at the last tick.
+    on: bool,
+    status: NetShare,
+    /// The server's messages being put together (one transfer per player).
+    assembly: Reassembly,
+    /// Each player's latest state, as received (applied to their engine by [`apply_states`]).
+    states: Vec<(u128, Vec<u8>)>,
+}
+
+impl Default for NetClient {
+    fn default() -> Self {
+        NetClient {
+            key: None,
+            current: None,
+            digest: 0,
+            sent: false,
+            frames: Default::default(),
+            asked: false,
+            wait: 0,
+            have_in: 0,
+            state: None,
+            state_sent: None,
+            state_wait: 0,
+            needs: Vec::new(),
+            needed: Vec::new(),
+            online: false,
+            peers: false,
+            on: true,
+            status: NetShare::Nothing,
+            assembly: Reassembly::new(64),
+            states: Vec::new(),
+        }
+    }
+}
+
+thread_local! {
+    static NET: RefCell<NetClient> = RefCell::new(NetClient::default());
+}
+
+fn share_key(s: &State, on: bool) -> ShareKey {
+    (on, s.loaded.clone(), s.loaded_skin.clone(), s.model.is_some(), s.waiting.is_some(), s.share_gen)
+}
+
+/// The message the local player's model calls for, and the status; `None` while a link model
+/// waits for its download (the last message stands).
+fn desired_share(s: &State, on: bool) -> Option<(SyncMessage, NetShare)> {
+    if !on {
+        return Some((SyncMessage::Clear { uuid: 0 }, NetShare::Off));
+    }
+    if s.waiting.is_some() {
+        return None;
+    }
+    let unset = SyncMessage::Unset { uuid: 0 };
+    if s.model.is_none() {
+        return Some(match s.loaded {
+            None => (SyncMessage::Clear { uuid: 0 }, NetShare::Nothing),
+            Some(_) => (unset, NetShare::NotLoaded),
+        });
+    }
+    Some(match &s.share {
+        Some(SharePlan::Model(kind, data)) => (SyncMessage::Model { uuid: 0, kind: *kind, data: data.clone() }, NetShare::Shared(*kind)),
+        Some(SharePlan::HeldBack(n)) => (unset, NetShare::HeldBack(*n)),
+        Some(SharePlan::Clear) | None => (SyncMessage::Clear { uuid: 0 }, NetShare::Nothing),
+    })
+}
+
+/// A heartbeat delay with some jitter, so the players' Haves spread out.
+fn have_delay() -> u32 {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    CLIENT_HAVE_TICKS + nanos % (CLIENT_HAVE_JITTER + 1)
+}
+
+/// Drops what the server sent: the players draw their skins' models again.
+fn forget_received(n: &mut NetClient) {
+    n.assembly = Reassembly::new(64);
+    n.states.clear();
+    n.needs.clear();
+    n.needed.clear();
+    n.peers = false;
+    OTHERS.with_borrow_mut(|o| o.net.clear());
+}
+
+// ---- Gestures, poses and parameters: a [`SyncMessage::State`]'s bytes ----
+
+/// A player's gesture, pose and parameter values, as their [`SyncMessage::State`] carries them.
+/// The layout follows CPM's gesture packet (`GestureC2S`: the pose, the gesture, then the model's
+/// parameter bytes) with indices into the model's own lists in place of CPM's ids, since both
+/// ends load the same model: `[1][digest u64][gesture + 1][its start number][pose + 1][parameters]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerState {
+    /// The [`model_digest`] of the model it is for: applied only to that model.
+    pub digest: u64,
+    /// The gesture playing (an index into the model's gestures) and the low byte of its start's
+    /// number (a restart is a new one).
+    pub gesture: Option<(usize, u8)>,
+    /// The custom pose (an index into [`cpm_core::Engine::custom_poses`]).
+    pub pose: Option<usize>,
+    /// [`cpm_core::Engine::parameters`] (empty: not sent, too long).
+    pub params: Vec<u8>,
+}
+
+const STATE_FORMAT: u8 = 1;
+const STATE_HEAD: usize = 12;
+
+/// `s` as a State's bytes; parameters that would take it past [`SYNC_MAX_STATE`] are left out,
+/// an index past 254 is sent as none.
+pub fn encode_state(s: &PlayerState) -> Vec<u8> {
+    let index = |i: Option<usize>| i.filter(|&i| i < 255).map_or(0, |i| i as u8 + 1);
+    let mut out = Vec::with_capacity(STATE_HEAD + s.params.len());
+    out.push(STATE_FORMAT);
+    out.extend(s.digest.to_be_bytes());
+    out.push(index(s.gesture.map(|(g, _)| g)));
+    out.push(s.gesture.map_or(0, |(_, e)| e));
+    out.push(index(s.pose));
+    if STATE_HEAD + s.params.len() <= SYNC_MAX_STATE {
+        out.extend(&s.params);
+    }
+    out
+}
+
+/// A State's bytes; `None` for another format or too few bytes.
+pub fn decode_state(b: &[u8]) -> Option<PlayerState> {
+    if b.len() < STATE_HEAD || b[0] != STATE_FORMAT {
+        return None;
+    }
+    let index = |v: u8| (v > 0).then(|| v as usize - 1);
+    Some(PlayerState {
+        digest: u64::from_be_bytes(b[1..9].try_into().expect("8 bytes")),
+        gesture: index(b[9]).map(|g| (g, b[10])),
+        pose: index(b[11]),
+        params: b[STATE_HEAD..].to_vec(),
+    })
+}
+
+/// The local model's state for the model message of `digest`, and whether it is at rest.
+fn local_state(s: &State, digest: u64) -> Option<(Vec<u8>, bool)> {
+    let e = &s.model.as_ref()?.engine;
+    let gesture = e.gesture_run().map(|(g, start)| (g, start as u8));
+    let pose = e.custom_pose().and_then(|name| e.custom_poses().iter().position(|p| p == name));
+    let params = e.parameters();
+    let rest = gesture.is_none() && pose.is_none() && params == e.default_parameters();
+    Some((encode_state(&PlayerState { digest, gesture, pose, params }), rest))
+}
+
+/// Plays `st`'s gesture on another player's engine as their gesture menu did: started (again) or
+/// stopped when it changed since `prev` (a gesture that ended there is not played again).
+fn apply_gesture(e: &mut cpm_core::Engine, st: &PlayerState, prev: Option<&PlayerState>, now_ms: u64) {
+    if prev.map(|p| p.gesture) != Some(st.gesture) {
+        match st.gesture {
+            Some((g, _)) if e.gestures().get(g).is_some_and(|g| g.kind == cpm_core::anim::GestureKind::Gesture) => {
+                if e.playing_gesture() == Some(g) {
+                    e.stop_gesture();
+                }
+                e.play_gesture(g, now_ms);
+            }
+            _ => e.stop_gesture(),
+        }
+    }
+}
+
+/// Sets `st`'s custom pose and parameters on another player's engine where they differ.
+fn hold_pose_and_params(e: &mut cpm_core::Engine, st: &PlayerState) {
+    let name = st.pose.and_then(|i| e.custom_poses().into_iter().nth(i));
+    if e.custom_pose() != name.as_deref() {
+        match st.pose.filter(|_| name.is_some()) {
+            Some(i) => e.set_custom_pose(Some(i)),
+            None => e.reset_pose(),
+        }
+    }
+    if !st.params.is_empty() && e.parameters() != st.params {
+        e.set_parameters(&st.params);
+    }
+}
+
+/// Gives each other player's network model the latest state the server sent of them, once per
+/// change, when it is for that model (its digest); never the local player's engine.
+fn apply_states(o: &mut Others, now_ms: u64) {
+    NET.with_borrow(|n| {
+        for e in &mut o.entries {
+            let OtherSource::Net { digest, .. } = &e.source else { continue };
+            let OtherLoad::Ready(m) = &mut e.load else { continue };
+            let Some((_, data)) = n.states.iter().find(|(u, _)| *u == e.uuid) else { continue };
+            if e.applied.as_ref().map(|(d, _)| d) != Some(data) {
+                // For another model (one not here yet), or one that does not read: it waits.
+                let Some(st) = decode_state(data).filter(|st| st.digest == *digest) else { continue };
+                let prev = e.applied.as_ref().map(|(_, p)| p);
+                apply_gesture(&mut m.engine, &st, prev, now_ms);
+                e.applied = Some((data.clone(), st));
+            }
+            // The pose and parameters held on every pass, as CPM's remote players hold the synced
+            // ones: their engine's own main-pose change (what the game knows of them) clears a pose.
+            if let Some((_, st)) = &e.applied {
+                hold_pose_and_params(&mut m.engine, st);
+            }
+        }
+    });
+}
+
+// ---- The gist popup in a shared world, and the settings page's line ----
+
+/// The settings page's line on what the others see of the local player's model; `None` when there
+/// is nothing to say (the mod off, nothing chosen: they see the vanilla player).
+pub fn share_status_line(status: &NetShare) -> Option<String> {
+    match status {
+        NetShare::Off | NetShare::Nothing => None,
+        NetShare::Shared(_) => Some("Your model is shared with the players who have the mod".to_owned()),
+        NetShare::NotLoaded => Some("Others see your normal skin: your model did not load".to_owned()),
+        NetShare::HeldBack(n) => Some(format!(
+            "Others see your normal skin: your model is {} KiB, over {GIST_LIMIT_KIB} KiB (use a gist link)",
+            n.div_ceil(1024)
+        )),
+    }
+}
+
+/// [`share_status_line`] for the settings page, while in a world that carries the mod's messages
+/// (for a shared model, only once another player with the mod is here). Of the model loaded now,
+/// not the last tick's: the ticks stop while a single-player world is paused in the menus, and the
+/// model may have just been switched there. (A link model still waiting for its download: the last
+/// tick's.)
+pub fn net_status_line() -> Option<String> {
+    let (online, peers, on, cached) = NET.with_borrow(|n| (n.online, n.peers, n.on, n.status.clone()));
+    if !online {
+        return None;
+    }
+    let status = STATE.with_borrow(|s| desired_share(s, on)).map_or(cached, |(_, status)| status);
+    match status {
+        // Shared with no one: nothing to say (single player).
+        NetShare::Shared(_) if !peers => None,
+        _ => share_status_line(&status),
+    }
+}
+
+/// The settings page's `Make a gist link for <model>…` button: shown while the loaded model file
+/// (not the skin's) is held back for its size ([`SharePlan::HeldBack`]), whoever is here.
+pub fn gist_button() -> Option<String> {
+    STATE.with_borrow(|s| {
+        let (path, _) = held_back(s)?;
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        Some(format!("Make a gist link for {stem}…"))
+    })
+}
+
+/// The loaded model file and its shared size, when it is held back for its size.
+fn held_back(s: &State) -> Option<(PathBuf, usize)> {
+    let path = s.loaded.clone().filter(|p| !is_skin(p))?;
+    s.model.as_ref()?;
+    match s.share {
+        Some(SharePlan::HeldBack(size)) => Some((path, size)),
+        _ => None,
+    }
+}
+
+/// `Make a gist link…` clicked: the held-back model's gist text written next to it (when missing)
+/// and its gist popup due now, at every click (the automatic one comes once a session). False
+/// when the loaded model is not held back (nothing done).
+pub fn make_gist() -> bool {
+    STATE.with_borrow_mut(|s| {
+        let Some((path, size)) = held_back(s) else { return false };
+        if !s.gist_prompted.contains(&path) {
+            s.gist_prompted.push(path.clone());
+        }
+        open_gist(s, path, size);
+        true
+    })
+}
+
+/// The shown gist popup's `Save link` ([`GistPopup::save_link`]); once saved, the link model is
+/// selected and due as the `model` setting ([`take_model_setting_due`]), so it is what the others
+/// get. `None` when no popup is shown.
+pub fn save_gist_link() -> Option<Result<PathBuf, String>> {
+    let result = with_gist_popup(|p| p.save_link())?;
+    if let Ok(path) = &result {
+        STATE.with_borrow_mut(|s| {
+            s.selected = Some(path.clone());
+            s.model_setting_due = Some(model_setting(Some(path)));
+        });
+    }
+    Some(result)
+}
+
+/// The `model` setting's new value, once, when something other than a settings click chose the
+/// model (the gist popup's `Save link`); the frame hook keeps it.
+pub fn take_model_setting_due() -> Option<String> {
+    STATE.with_borrow_mut(|s| s.model_setting_due.take())
+}
+
+/// A model held back ([`NetShare::HeldBack`]) while another player with the mod is here: the gist
+/// popup, once per model file this session, its gist text written next to it if not there yet.
+fn prompt_gist(s: &mut State, size: usize) {
+    let Some(path) = s.loaded.clone().filter(|p| !is_skin(p)) else { return };
+    if s.gist_prompted.contains(&path) {
+        return;
+    }
+    s.gist_prompted.push(path.clone());
+    log::info!("cpm: {} is too big to send to the other players: the gist popup", file_name(Some(&path)));
+    open_gist(s, path, size);
+}
+
+/// `path`'s gist popup due (`size`: its shared size), its gist text written next to it if not
+/// there yet.
+fn open_gist(s: &mut State, path: PathBuf, size: usize) {
+    let gist = gist_path(&path);
+    if !gist.exists() {
+        let written = std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| cpm_core::link::gist_text(&b).map_err(|e| e.to_string()))
+            .and_then(|text| {
+                let tmp = staged(&gist, text.as_bytes())?;
+                std::fs::rename(&tmp, &gist).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp);
+                    e.to_string()
+                })
+            });
+        if let Err(e) = written {
+            log::warn!("cpm: cannot write {}: {e}", gist.display());
+        }
+    }
+    s.gist_popup = Some((path, size));
+}
+
+/// Once a tick, on the window (net.rs). `online`: in a server's play state that carries mod
+/// messages (joined, not being reconfigured). Sends the server the local player's model (the mod
+/// `on` or not) once when it changed (whole again after a refused frame, and when the server asks
+/// with a [`SyncMessage::Need`]), its state when it changed (at most every
+/// [`CLIENT_STATE_MIN_TICKS`]), a [`SyncMessage::Have`] every [`CLIENT_HAVE_TICKS`] or so, and the
+/// Needs for other players' models it lacks. Going offline (a disconnect, a proxy moving the
+/// player to another server) drops what the server sent; everything is sent again once online.
+/// `send` is `native_net_send_to_server`.
+pub fn net_client_tick(on: bool, online: bool, mut send: impl FnMut(&[u8]) -> Result<(), String>) {
+    // A one-shot gesture that played out stops, as CPM's auto-reset does (else it would stay in
+    // the state the others get, and play again for each new one).
+    let now_ms = clock_ms(Instant::now());
+    STATE.with_borrow_mut(|s| {
+        if let Some(m) = s.model.as_mut() {
+            m.engine.auto_reset_gesture(now_ms);
+        }
+    });
+    let key = STATE.with_borrow(|s| share_key(s, on));
+    NET.with_borrow_mut(|n| {
+        n.on = on;
+        if n.key.as_ref() != Some(&key)
+            && let Some((m, status)) = STATE.with_borrow(|s| desired_share(s, on))
+        {
+            n.key = Some(key);
+            n.status = status;
+            if n.current.as_ref() != Some(&m) {
+                n.frames = encode_sync(&m).into();
+                n.digest = model_digest(&m);
+                n.current = Some(m);
+                n.sent = false;
+            }
+        }
+        n.state = match n.status {
+            NetShare::Shared(_) => STATE.with_borrow(|s| local_state(s, n.digest)),
+            _ => None,
+        };
+        if n.online && !online {
+            forget_received(n);
+        }
+        if !online {
+            n.online = false;
+            n.sent = false;
+            n.frames.clear();
+            n.state_sent = None;
+            n.state_wait = 0;
+            n.wait = 0;
+            return;
+        }
+        n.online = true;
+        if let NetShare::HeldBack(size) = n.status
+            && n.peers
+        {
+            STATE.with_borrow_mut(|s| prompt_gist(s, size));
+        }
+        for (_, left) in &mut n.needed {
+            *left = left.saturating_sub(1);
+        }
+        n.needed.retain(|(_, left)| *left > 0);
+        n.state_wait = n.state_wait.saturating_sub(1);
+        if n.wait > 0 {
+            n.wait -= 1;
+            return;
+        }
+        let Some(current) = n.current.clone() else { return };
+        if std::mem::take(&mut n.asked) && n.sent {
+            // The host lost the model, so the state it held with it: both go again.
+            n.sent = false;
+            n.state_sent = None;
+            n.state_wait = 0;
+        }
+        let mut budget = CLIENT_SEND_PER_TICK;
+        let mut out = |n: &mut NetClient, frame: &[u8]| match send(frame) {
+            Ok(()) => true,
+            Err(e) => {
+                log::debug!("cpm: not sent to the server yet: {e}");
+                n.wait = CLIENT_RETRY_TICKS;
+                false
+            }
+        };
+        // The model, whole.
+        if !n.sent {
+            if n.frames.is_empty() {
+                n.frames = encode_sync(&current).into();
+            }
+            while budget > 0 {
+                let Some(frame) = n.frames.front().cloned() else { break };
+                if !out(n, &frame) {
+                    // The whole message goes again: a transfer cut short is dropped by the host.
+                    n.frames.clear();
+                    return;
+                }
+                n.frames.pop_front();
+                budget -= 1;
+            }
+            if !n.frames.is_empty() {
+                return;
+            }
+            n.sent = true;
+            // + 1: the heartbeat below counts this tick down already.
+            n.have_in = have_delay() + 1;
+        }
+        // The state, when it changed (at rest needs no State on joining).
+        let due = match (&n.state, &n.state_sent) {
+            (Some((now, _)), Some(sent)) => now != sent,
+            (Some((_, rest)), None) => !rest,
+            (None, _) => false,
+        };
+        if due && n.state_wait == 0 && budget > 0 {
+            let data = n.state.as_ref().expect("a state").0.clone();
+            if !out(n, &encode_sync(&SyncMessage::State { uuid: 0, data: data.clone() })[0]) {
+                return;
+            }
+            budget -= 1;
+            n.state_sent = Some(data);
+            n.state_wait = CLIENT_STATE_MIN_TICKS;
+        }
+        // The heartbeat.
+        n.have_in = n.have_in.saturating_sub(1);
+        if n.have_in == 0 && budget > 0 {
+            let state = n.state.as_ref().map(|(s, _)| s.clone()).unwrap_or_default();
+            if !out(n, &encode_sync(&SyncMessage::Have { uuid: 0, digest: n.digest, state: state.clone() })[0]) {
+                n.have_in = 1;
+                return;
+            }
+            budget -= 1;
+            if !state.is_empty() {
+                n.state_sent = Some(state);
+            }
+            n.have_in = have_delay();
+        }
+        // The other players' models it lacks.
+        while budget > 0 && !n.needs.is_empty() {
+            let uuid = n.needs[0];
+            if !out(n, &encode_sync(&SyncMessage::Need { uuid })[0]) {
+                return;
+            }
+            n.needs.remove(0);
+            n.needed.push((uuid, CLIENT_NEED_TICKS));
+            budget -= 1;
+        }
+    });
+}
+
+/// What the others are sent of the local player's model ([`NetShare`]), for the settings page's
+/// status line ([`net_status_line`]). Only the tests ask.
+#[allow(dead_code)]
+pub fn net_share_status() -> NetShare {
+    NET.with_borrow(|n| n.status.clone())
+}
+
+/// The connection ended (net.rs, `client_disconnecting`): everything the server sent goes (the
+/// players draw their skins' models again), and the model is sent again on the next join.
+pub fn net_client_reset() {
+    NET.with_borrow_mut(|n| {
+        forget_received(n);
+        *n = NetClient::default();
+    });
+}
+
+/// The [`model_digest`] of what this client holds of `uuid` from the server (an Unset's when
+/// nothing).
+fn held_digest(uuid: u128) -> u64 {
+    OTHERS.with_borrow(|o| match o.net.iter().find(|(u, _)| *u == uuid).map(|(_, m)| m) {
+        Some(NetModel::Model { digest, .. }) => *digest,
+        Some(NetModel::Clear) => model_digest(&SyncMessage::Clear { uuid }),
+        None => model_digest(&SyncMessage::Unset { uuid }),
+    })
+}
+
+/// Keeps `uuid`'s latest state.
+fn keep_state(n: &mut NetClient, uuid: u128, data: Vec<u8>) {
+    n.states.retain(|(u, _)| *u != uuid);
+    if n.states.len() >= NET_MAX_PLAYERS {
+        n.states.remove(0);
+    }
+    n.states.push((uuid, data));
+}
+
+/// A [`SYNC_CHANNEL`] message from the server (net.rs, `net_from_server`): another player's model
+/// or Clear goes to the others registry ([`Others::net`]), an Unset drops what it had of them, their
+/// state is kept for their engine ([`apply_states`]); a Have of another model than the one held
+/// of them makes this client ask for it, and the server's Need makes it send its own again.
+pub fn net_client_receive(frame: &[u8]) {
+    let m = match NET.with_borrow_mut(|n| n.assembly.push(None, frame)) {
+        Ok(Some(m)) => m,
+        Ok(None) => return,
+        Err(e) => return log::debug!("cpm: a bad message from the server: {e}"),
+    };
+    if let Err(e) = m.check() {
+        return log::debug!("cpm: {}: a message refused: {e}", other_name(m.uuid()));
+    }
+    let uuid = m.uuid();
+    if !matches!(m, SyncMessage::Unset { .. } | SyncMessage::Need { .. }) {
+        NET.with_borrow_mut(|n| n.peers = true);
+    }
+    match m {
+        SyncMessage::Need { .. } => NET.with_borrow_mut(|n| n.asked = true),
+        SyncMessage::State { data, .. } => NET.with_borrow_mut(|n| keep_state(n, uuid, data)),
+        SyncMessage::Have { digest, state, .. } => {
+            let lacks = held_digest(uuid) != digest;
+            NET.with_borrow_mut(|n| {
+                if lacks && !n.needs.contains(&uuid) && !n.needed.iter().any(|(u, _)| *u == uuid) {
+                    n.needs.push(uuid);
+                }
+                if !state.is_empty() && n.states.iter().all(|(u, d)| *u != uuid || *d != state) {
+                    keep_state(n, uuid, state);
+                }
+            });
+        }
+        SyncMessage::Unset { .. } => {
+            NET.with_borrow_mut(|n| n.states.retain(|(u, _)| *u != uuid));
+            OTHERS.with_borrow_mut(|o| o.net.retain(|(u, _)| *u != uuid));
+        }
+        m => OTHERS.with_borrow_mut(|o| {
+            let digest = model_digest(&m);
+            let model = match m {
+                SyncMessage::Model { data, .. } => {
+                    // The same model again (a host's late-joiner send and its relay) loads once.
+                    let same = o.net.iter().any(|(u, n)| *u == uuid && matches!(n, NetModel::Model { digest: d, .. } if *d == digest));
+                    if same {
+                        return;
+                    }
+                    o.net_seq += 1;
+                    NetModel::Model { seq: o.net_seq, data: std::sync::Arc::new(data), digest }
+                }
+                _ => NetModel::Clear,
+            };
+            o.net.retain(|(u, _)| *u != uuid);
+            if o.net.len() >= NET_MAX_PLAYERS {
+                o.net.remove(0);
+            }
+            o.net.push((uuid, model));
+        }),
+    }
+}
+
+/// The latest state the server sent of `uuid` ([`apply_states`] applies it). Only the tests ask.
+#[allow(dead_code)]
+pub fn net_state(uuid: u128) -> Option<Vec<u8>> {
+    NET.with_borrow(|n| n.states.iter().find(|(u, _)| *u == uuid).map(|(_, d)| d.clone()))
 }

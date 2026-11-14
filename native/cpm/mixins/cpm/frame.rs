@@ -13,7 +13,7 @@ fn cpm_frame(game: &mut crate::game::Game<'_>) {
     }
     // The gist popup: open its screen when due, run what its input asked for, drop it once closed.
     crate::game::cpm_gist::frame(game);
-    // The gesture menu (the menu key or `Gestures…`): open its screen when asked for and the game
+    // The gesture menu (the menu key): open its screen when asked for and the game
     // lets it, drop it once closed (or the mod is off).
     crate::game::cpm_menu::frame(game);
     // Player heads: the item renderer's drawing of the player's own (once), and who the player is

@@ -3,7 +3,8 @@
 Draws you (the local player) with a [Customizable Player Models](https://github.com/tom5454/CustomPlayerModels)
 model: a `.cpmmodel` file exported from the CPM editor. The model's own animations play (walking, sneaking,
 swimming, flying, ...), and a gesture menu plays its gestures and custom poses. Other players are drawn with the
-models stored in their skins (see [Other players](#other-players)); CPM servers and Horizon worlds are to come.
+models stored in their skins, and in Horizon-hosted worlds with the model they chose, their gestures and poses
+(see [Other players](#other-players)); CPM servers are to come.
 
 ## Install
 
@@ -22,7 +23,7 @@ or use the launcher window's **Build** button described below.
 
 **As an installed mod (kept with the instance's other native mods):**
 
-1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.2.0.hnmod`.
+1. Make the file: `python native/tools/native.py package cpm` writes `native/target/cpm-0.3.0.hnmod`.
 2. Copy it to `%APPDATA%\horizon\horizon-native-mods\cpm.hnmod`. Create the folder if it is missing.
 3. Turn it on: add the line `mod.cpm:true` to `%APPDATA%\horizon\horizon-mods.txt`. Create the file if it is
    missing. The launcher builds only the native mods that are turned on there.
@@ -51,6 +52,10 @@ Options → Mods.
    `.cpmmodel` file in the folder by name, then None again. The choice is kept (the `model` setting) and comes
    back at the next start; if its file is gone, you are drawn vanilla.
 3. Press F5 to see yourself.
+
+The settings page's buttons, in order: **Model**, **Open models folder**, **Convert project…**, **Other players'
+models: On/Off**, **Max other models**, **Safety level**, then (only while the chosen model is too big to send, see the gist flow)
+**Make a gist link for <name>…**, then its information lines. The gesture menu is the `G` key's.
 
 If a model cannot be drawn, the settings page shows an `Error:` line (also in the log, `cpm: <file>: ...`). A
 model file needs its own embedded texture (no skin fallback yet), and the texture must be at most 1020x1024 (with
@@ -84,8 +89,7 @@ it blends in 20 steps a second rather than every frame).
 ### Gesture menu
 
 The key **Gesture menu** (`G` by default, rebindable in Options > Mods) opens the model's gesture menu while you
-are playing (not in menus or chat). The settings page's **Gestures…** button asks for the same menu: it opens once
-you close the menus and are back in the world (it never opens over another screen).
+are playing (not in menus or chat). It never opens over another screen.
 
 The menu is laid out as CPM's own: a top row with **Reset Gesture** (stops the playing gesture) and **Reset Pose**
 (clears the custom pose), then the model's buttons in the model's order, four to a row (fewer on a narrow window).
@@ -209,6 +213,11 @@ plus health, hunger, air and light, what is worn (a skull or helmet, an elytra o
 and a parrot on either shoulder. The poses are picked in CPM's order. Speaking, VR, the in-GUI and in-menu poses
 do not play.
 
+A model with its own head yaw or head pitch pose (CPM's head rotation poses, which move parts with where you
+look) does the looking itself: its head part does not also turn with the look, as in CPM. A neck built on the
+head (a raptor's) then stays on the body and only what those poses move turns. Models without them turn their
+head with the look as usual.
+
 ### Render scale
 
 A model's render scale (its position, rotation and per-axis scale, set in the CPM editor's scaling settings)
@@ -275,8 +284,10 @@ ends. (If the page still says **Converting…**, press any of its buttons or reo
 - On an error nothing is written, and the page shows `Convert error: ...`. The converted model is loaded back
   before it is written: one that would not load is an error too (`exported model does not load: ...`).
 
-**Gist limit** (the `gist_limit_kib` setting, 8 KiB by default; the button goes 4, 8, 16, 32, 64): CPM sends a
-model to other players inline only when it is small. A converted model bigger than the limit still works for
+**Gist limit** (fixed at 64 KiB, not a setting): CPM sends a
+model to other players inline only when it is small. The size that counts is the model without its picker icon
+(the icon is never sent), so a file a little over 64 KiB on disk may still go inline. A converted model bigger than
+the limit still works for
 you, but the converter also writes `<name>.gist.txt` next to it and opens the gist popup, so you can make a small
 *link model* that points at a GitHub Gist instead. The page then says `Converted: <name>.cpmmodel — too big: the
 gist popup opens when you return to the game`: the popup cannot open over the menus, so it opens once you close
@@ -284,15 +295,17 @@ them and are in a world (converted from the title screen: when you join a world)
 
 ### The gist flow
 
-1. Convert a project bigger than the gist limit, then close the menus. The **Upload to a GitHub Gist** popup
-   opens over the game.
+1. Convert a project bigger than the gist limit, then close the menus; or, with a model over the limit chosen,
+   press **Make a gist link for <name>…** on the settings page and close the menus. The **Upload to a GitHub
+   Gist** popup opens over the game.
 2. Press **Copy text**: the gist text goes onto the clipboard. (If the clipboard does not take it, open
    `<name>.gist.txt` in the models folder and copy it from there.)
 3. Press **Open gist.github.com**, sign in, paste the text into a new gist and create it as a **public** gist.
 4. Copy the gist's page link (`https://gist.github.com/<user>/<id>`), paste it into the popup's field (Ctrl+V)
    and press **Save link** (or Enter).
 5. The popup writes `<name>.link.cpmmodel` next to the model: the same name, description and skin type, with
-   only the link inside. Escape or **Close** closes the popup.
+   only the link inside. It becomes your model (kept as the `model` setting), so it is what the other players
+   get. Escape or **Close** closes the popup.
 
 ### Link models
 
@@ -321,7 +334,40 @@ in-game test model) and an unknown loader are errors (`unsupported link`).
 ### Other players
 
 Other players in the world are drawn with the model stored in their Mojang skin, on any server, as CPM draws a
-skin's model (CPM's server plugin and Horizon worlds, which send models another way, are to come).
+skin's model. In a world hosted by Horizon (a single-player world opened to LAN, or a Horizon server), every
+player with this mod also sees the model the others chose, which wins over their skin's (CPM's server plugin is to
+come).
+
+- **Horizon-hosted worlds**: the mod's client and server halves exchange the chosen models over Horizon's mod
+  messages (channel `cpm:sync`). The host keeps each player's latest model, sends it to every other player with
+  the mod (a late joiner gets them all), and drops it when they leave; the host is a player like the others. A
+  model of 64 KiB or less is sent as its file without its picker icon (the size counted is that too); a link
+  model sends its own small data (the others download the
+  link). A bigger model, or one that does not load, is not sent: the others see the model in your skin (or your
+  normal skin) until you choose a link model of it (the gist flow makes one). Choosing no model, or turning the
+  mod off, shows you vanilla to them, as CPM does. What is received keeps the limits below.
+- **What is sent**: the whole model only once: when you join (another server, a proxy's included), when you
+  choose or convert another model, and when the host asks for it. After that, every 5 to 7 seconds, only a few
+  bytes go: a digest of the model and your gesture state. The host asks for your model when its digest is not the
+  one it holds (a change it lost); a player who holds another model of you (or none) asks the host, which sends
+  it to that player only (four in ten seconds per player at most).
+- **Gestures and poses**: the gesture playing, the custom pose, and the toggle, slider and dropdown values go
+  when they change (ten a second at most) and with each digest, and play on that player's model on the others'
+  screens, as their gesture menu did. Their custom pose and values are held there as CPM holds them (their
+  model's own pose changes on your screen do not drop them). A one-shot gesture ends for everyone once it has
+  played (CPM's auto-reset: its length plus five ticks), so it does not play again for a player who sees them
+  later. A state for another model than the one held of them waits for it. A link model is named by its own small
+  data: if its gist was edited since the other player downloaded it, a gesture may name another one.
+- **Too big to send**: in a world with another player who has the mod, a model over 64 KiB (without its icon)
+  that is not a link model opens the gist popup (once per model a session; its `<name>.gist.txt` is written if
+  missing). Whenever such a model is chosen, alone or not, the settings page also has **Make a gist link for
+  <name>…**, which opens the popup at every press (once the menus are closed). In a Horizon-hosted world the
+  settings page says why the others see your normal skin (too big, with its size, or it did not load), and, once
+  another player with the mod is there, `Your model is shared ...`; the line follows the model chosen right now,
+  even while a single-player world is paused.
+- **Host caps**: 64 KiB inline, 1 KiB for a link model, 1 KiB for a gesture state, four model changes in ten
+  seconds and twenty states a second (the latest goes after), and it asks a player for their model at most every
+  five seconds. Messages of another version of this mod, and kinds it does not know, are not read.
 
 - **Loading**: each player's downloaded skin file is read, and its model loaded (its links downloaded and cached
   as yours are), off the game's thread. A player draws vanilla until their model is ready, and stays vanilla when
@@ -331,25 +377,40 @@ skin's model (CPM's server plugin and Horizon worlds, which send models another 
   the swing, the item in use (bow, crossbow, eating, blocking, ...), hurt and dying, health, and the light
   where they stand. Their armour, trims, elytra, cape, held and head items and shoulder parrots are drawn as
   yours are. What the game is not told of another player plays as off: hunger, air (Horizon does not keep
-  another player's), creative flight, falling, and gestures and custom poses (those need CPM's server or
-  Horizon worlds). As for you, the riptide swirl, stuck arrows and bee stingers, and other mods' layers are
+  another player's), creative flight, falling, and, outside Horizon-hosted worlds, gestures and custom poses
+  (those need CPM's server). As for you, the riptide swirl, stuck arrows and bee stingers, and other mods' layers are
   not drawn on a player the model draws.
 - **Settings**: `Other players' models: On/Off` (on) and `Max other models: N` (8; 1, 2, 4, 8, 16 or 32), with
   how many are loaded. The nearest players get the places: with every place taken, a player at least 4
   blocks nearer than the farthest one drawn (drawn for 3 s or more) is loaded beside them, and takes that
   place only once their model is ready, so a player whose skin holds none never costs anyone theirs.
-- **Limits** (CPM's for players who are not friends): textures at most 256 px a side (each image's own size),
-  at most 256 cubes (extruded ones counted as CPM counts them), links at most 100 KiB each and 1 MiB of model
-  data in all. A model past them draws vanilla, with one log line for that player. A link that failed to
+- **Safety level** (`Safety level: Medium`, kept as the `safety` setting): CPM's built-in safety profiles for
+  other players' models, in turn Medium (the default), Low, Off, High. Your own model is never limited.
+
+  | Level | Models | Animated textures | Texture sheet | Link text | Cubes | Model data in all |
+  |---|:-:|:-:|--:|--:|--:|--:|
+  | Off | yes | yes | 8192 px | 256 MiB (16 MiB: the download's own cap) | any | 32 MiB |
+  | Low | yes | yes | 512 px | 1 MiB | 1024 | 4 MiB |
+  | Medium | yes | no | 256 px | 100 KiB | 256 | 1 MiB |
+  | High | no | no | - | - | - | - |
+
+  The texture sheet is each image's own size, read from its PNG header before anything is decoded; extruded
+  cubes count as CPM counts them; a link's download stops at its cap. CPM has no cap on the model data in all
+  (the skin data and every link's text together); this port keeps 1 MiB at Medium and scales it with the link
+  cap. A model past them draws vanilla, with one log line for that player, and the settings page says
+  `Blocked by safety level: N player(s) (<the first reason>) — raise the safety level to see them`. Changing
+  the level loads the blocked models again, and, when the new level is stricter in any limit, every other
+  player's model too (those now past it go). High loads none: it does what `Other players' models: Off` does,
+  which stays as its own button so the level is kept while the models are off. A link that failed to
   download is tried again after a minute, three tries in all.
 - **Texture room**: Horizon gives a mod one 1024x1024 image. Each other player's model takes a region of it
   beside yours; when it is full, the rest draw vanilla until room frees up.
-- Animated textures do not play on other players (CPM's default for players who are not friends), and their
-  player heads stay vanilla.
+- Animated textures play on other players at the Low and Off safety levels (not at Medium, CPM's default), and
+  their player heads stay vanilla.
 
 ## Not supported (yet)
 
-Other players' player heads, gestures and custom poses, models from CPM servers and Horizon worlds, placed player heads, modded armor, the enchantment glint in the preview, and items and parrots in the
+Other players' player heads, their gestures and custom poses outside Horizon-hosted worlds, models from CPM servers, model sharing for split-screen players (only the first one shares), placed player heads, modded armor, the enchantment glint in the preview, and items and parrots in the
 preview. Duplicated root parts (a second head, arm and so on) are drawn as
 CPM draws them: they follow their body part's pose with their own offset, draw that part's skin box and second
 layer unless hidden, take their animations and draw their cubes. Extruded parts are drawn as CPM draws them (the texture
@@ -359,18 +420,16 @@ sliced per texel, so its transparent texels leave holes).
 
 | File | What it is |
 |---|---|
-| `mixins/cpm/horizon-mixin.toml` | The bundle: seventeen modules, the HEAD hooks (and the `first_person_arm` and `player_head` injections), the `cpm-core` crate and the `[api]` package |
-| `mixins/cpm/api/` | A trait-mod package that overrides nothing. It puts CPM in the game's mod list, which the game needs before it reserves the `horizon/modimage` sprite the model's texture goes in |
+| `mixins/cpm/horizon-mixin.toml` | The bundle: eighteen modules, the HEAD hooks (and the `first_person_arm` and `player_head` injections), and the `cpm-core` crate |
 | `mixins/cpm/runtime.rs` | State and logic, added to the game as `game::cpm_mod`; also this crate's library, for its tests |
-| `mixins/cpm/*.rs` | One small helper per hook (frame, listened, player_submit, first_person_arm, player_head, mods list, settings, click, key, and CPM's mod screen's screen_render, screen_click, screen_release, screen_drag, screen_scroll, screen_key, screen_char); `draw.rs` (`game::cpm_draw`) draws quads for player_submit and first_person_arm, and a player head's quads; `player_head.rs`, at the head of the game's player-head item renderer, places the skull's head part and asks `skull_hook.rs` (`item_render::cpm_skull_hook`, in the client library) for that drawing; `head_probe.rs` (`game::cpm_head_probe`) reads your identities and a head's profile; `pose_probe.rs` (`game::cpm_pose_probe`), `action_probe.rs` (`game::cpm_action_probe`), `equipment_probe.rs` (`game::cpm_equipment_probe`), `cape_probe.rs` (`game::cpm_cape_probe`) `item_probe.rs` (`game::cpm_item_probe`) and `parrot_probe.rs` (`game::cpm_parrot_probe`) read the local player's state, its actions, what it wears, its cape, what it holds and its shoulder parrots for player_submit (`item_probe.rs` also draws the held and head items, `parrot_probe.rs` the parrots); `others_probe.rs` (`game::cpm_others_probe`) reads another player's state, stacks, cape and parrots and draws them with their model; `skin_probe.rs` (`game::cpm_skin_probe`) reads the downloaded skin files of the local player and the other players (nearest first) for the models stored in them; `convert.rs` (`game::cpm_convert`) runs the file picker and the `.cpmproject` conversion on its own thread; `gist_fetch.rs` (`game::cpm_gist_fetch`) downloads a model's links (gists and CPM's other loaders) on its own thread; `screen.rs` (`game::cpm_screen`) routes those screen hooks to the CPM screen shown: `gist_screen.rs` (`game::cpm_gist`), the gist popup for a model too big to send directly, or `gesture_screen.rs` (`game::cpm_menu`), the gesture menu |
+| `mixins/cpm/*.rs` | One small helper per hook (frame, listened, player_submit, first_person_arm, player_head, mods list, settings, click, key, and CPM's mod screen's screen_render, screen_click, screen_release, screen_drag, screen_scroll, screen_key, screen_char); `draw.rs` (`game::cpm_draw`) draws quads for player_submit and first_person_arm, and a player head's quads; `player_head.rs`, at the head of the game's player-head item renderer, places the skull's head part and asks `skull_hook.rs` (`item_render::cpm_skull_hook`, in the client library) for that drawing; `head_probe.rs` (`game::cpm_head_probe`) reads your identities and a head's profile; `pose_probe.rs` (`game::cpm_pose_probe`), `action_probe.rs` (`game::cpm_action_probe`), `equipment_probe.rs` (`game::cpm_equipment_probe`), `cape_probe.rs` (`game::cpm_cape_probe`) `item_probe.rs` (`game::cpm_item_probe`) and `parrot_probe.rs` (`game::cpm_parrot_probe`) read the local player's state, its actions, what it wears, its cape, what it holds and its shoulder parrots for player_submit (`item_probe.rs` also draws the held and head items, `parrot_probe.rs` the parrots); `others_probe.rs` (`game::cpm_others_probe`) reads another player's state, stacks, cape and parrots and draws them with their model; `skin_probe.rs` (`game::cpm_skin_probe`) reads the downloaded skin files of the local player and the other players (nearest first) for the models stored in them; `convert.rs` (`game::cpm_convert`) runs the file picker and the `.cpmproject` conversion on its own thread; `gist_fetch.rs` (`game::cpm_gist_fetch`) downloads a model's links (gists and CPM's other loaders) on its own thread; `net.rs` (`game::cpm_net`) is both halves of the `cpm:sync` mod messages (net_tick, net_from_client, net_from_server, net_joined, net_left and net_disconnect call it); `screen.rs` (`game::cpm_screen`) routes those screen hooks to the CPM screen shown: `gist_screen.rs` (`game::cpm_gist`), the gist popup for a model too big to send directly, or `gesture_screen.rs` (`game::cpm_menu`), the gesture menu |
 | `mixins/cpm/cpm-core/` | The `.cpmmodel` reader, model, animation engine and posing, free of the game |
 
 ```sh
 (cd native/cpm && cargo test)                  # the runtime
 (cd native/cpm/mixins/cpm/cpm-core && cargo test)   # the reader and engine
 python native/tools/native.py check cpm        # apply on the tested Horizon and cargo check the game
-                                               # (with the generated game executable the [api] package needs)
-python native/tools/native.py package cpm      # native/target/cpm-0.2.0.hnmod
+python native/tools/native.py package cpm      # native/target/cpm-0.3.0.hnmod
 ```
 
 `cargo test` inside `cpm-core` leaves a `Cargo.lock` and a `target/` there. Delete both before `check`:

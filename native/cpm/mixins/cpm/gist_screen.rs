@@ -10,6 +10,10 @@ use horizon_client::mod_api::{HudBatch, NativeScreenView};
 /// other screen up, so it waits out the settings page and the gesture menu), drops the popup
 /// once its screen closed (Escape), and runs what the input hooks asked for (clipboard, closing).
 pub(super) fn frame(game: &mut Game<'_>) {
+    // A link model just saved is the model now: kept as the `model` setting.
+    if let Some(value) = cpm::take_model_setting_due() {
+        game.native_set_setting(cpm::ID, cpm::MODEL_SETTING, &value);
+    }
     if !cpm::gist_popup_shown() {
         if let Some((model, size)) = cpm::pending_gist_popup()
             && cpm::shown_screen().is_none()
@@ -130,7 +134,7 @@ pub(super) fn mouse_pressed(screen: &NativeScreenView<'_>, button: i32, canceled
             }
         }
         Some(cpm::GistButton::Save) => {
-            cpm::with_gist_popup(|p| p.save_link());
+            cpm::save_gist_link();
         }
         Some(cpm::GistButton::Close) => cpm::request_gist(cpm::GistRequest::Close),
         None => {}
@@ -146,7 +150,7 @@ pub(super) fn key_pressed(key: &str, modifiers: u32, canceled: &mut bool) {
             cpm::with_gist_popup(cpm::GistPopup::backspace);
         }
         cpm::GistKey::Save => {
-            cpm::with_gist_popup(|p| p.save_link());
+            cpm::save_gist_link();
         }
         cpm::GistKey::Paste => cpm::request_gist(cpm::GistRequest::Paste),
         cpm::GistKey::Swallow => {}

@@ -931,9 +931,43 @@ impl Engine {
         self.active.map(|a| a.index)
     }
 
+    /// The playing gesture ([`Engine::playing_gesture`]) with its start's number: each start
+    /// (a restart of the same gesture too) has a new one.
+    pub fn gesture_run(&self) -> Option<(usize, u64)> {
+        self.active.map(|a| (a.index, a.epoch))
+    }
+
+    /// The parameters a freshly loaded model starts with (the layout of [`Engine::parameters`]).
+    pub fn default_parameters(&self) -> &[u8] {
+        &self.controls.defaults
+    }
+
+    /// CPM's gesture auto-reset (`gestureTimeout`, `AnimationEngine.clearGesture`): a non-looping
+    /// gesture stops `ceil(length / 50 ms) + 5` ticks after it started (its longest clip's length),
+    /// so a one-shot gesture that played out is not "playing" any more. Looping ones never do.
+    pub fn auto_reset_gesture(&mut self, now_ms: u64) {
+        let Some(a) = self.active else { return };
+        let Some(g) = self.set.gestures.get(a.index) else { return };
+        if g.looping {
+            return;
+        }
+        let len = g.clips.iter().map(|c| c.duration_ms as u64).max().unwrap_or(0);
+        if now_ms >= a.start + (len.div_ceil(50) + 5) * 50 {
+            self.stop_gesture();
+        }
+    }
+
     /// Stops the playing gesture. A must-finish gesture plays to the end of its current cycle.
     pub fn stop_gesture(&mut self) {
         self.active = None;
+    }
+
+    /// The model turns its head with the look itself: it has a head yaw or head pitch pose
+    /// (HEAD_ROTATION_YAW / HEAD_ROTATION_PITCH). Such a model is drawn without the vanilla head
+    /// turn ([`crate::mesh::LoadedModel::pose_with_items`]), as real CPM shows one: its neck
+    /// stays on the body and only what those poses move turns with the look.
+    pub fn drives_head_look(&self) -> bool {
+        self.has_pose(&HEAD_YAW) || self.has_pose(&HEAD_PITCH)
     }
 
     fn has_pose(&self, p: &Pose) -> bool {

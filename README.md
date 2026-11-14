@@ -79,8 +79,8 @@ It also converts `.cpmproject` files from the CPM editor into `.cpmmodel` files.
 | Feature | Original CPM | This port |
 |---|:-:|:-:|
 | Your own model | 🟢 | 🟢 |
-| Other players' models | 🟢 | 🟢 (from their skin, not yet tested with a second player; CPM servers and Horizon worlds coming) |
-| Server plugin and model sync | 🟢 | 🔴 |
+| Other players' models | 🟢 | 🟢 (from their skin, or, in Horizon-hosted worlds with the mod, the model they chose with its gestures and poses; held to CPM's safety level, Off, Low, Medium (default) or High, set on the settings page; CPM servers coming) |
+| Server plugin and model sync | 🟢 | 🟡 (models, gestures and poses in Horizon-hosted worlds: LAN, single player, Horizon servers; CPM's server plugin coming) |
 | Gameplay scaling (size, eye height, hitbox, reach, attributes) | 🟢 | 🔴 (needs CPM's server plugin) |
 
 ## Install
@@ -106,11 +106,12 @@ The paths are for the default **Horizon** instance. For another instance, use it
    Options → Mods → CPM → Settings opens it.
 2. Pick a model: press `G` for the gesture menu, then **Models** in its bottom left (a picker with icons and a 3D
    preview). You can also cycle through models with the **Model** button on the settings page.
-3. Press F5 to see yourself. The gesture menu (`G`, or **Gestures…** on the settings page) plays the model's
+3. Press F5 to see yourself. The gesture menu (`G`) plays the model's
    gestures and poses.
 
-To convert a `.cpmproject`, press **Convert project…** on the settings page and pick the file. Models over 8 KiB
-get a popup that walks you through putting them in a GitHub Gist, the same way CPM does.
+To convert a `.cpmproject`, press **Convert project…** on the settings page and pick the file. Models over 64 KiB
+(not counting their icon) get a popup that walks you through putting them in a GitHub Gist, the same way CPM
+does; for a model you already have, **Make a gist link for <name>…** on the settings page opens it.
 
 The full guide, with every setting, the gist flow and the known differences from CPM, is in
 [native/cpm/README.md](native/cpm/README.md).
@@ -121,7 +122,7 @@ The full guide, with every setting, the gist flow and the known differences from
 python native/tools/native.py package cpm
 ```
 
-This writes `native/target/cpm-0.2.0.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
+This writes `native/target/cpm-0.3.0.hnmod`. It needs Python 3.11 or newer. You can also build the source folder
 straight into the game:
 
 ```sh

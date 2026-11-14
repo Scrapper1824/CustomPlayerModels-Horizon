@@ -481,3 +481,28 @@ fn leaving_the_ground_plays_jumping_for_half_a_second() {
         assert_eq!(rot_x(&e2.sample(&PoseInput { on_ground: true, ..at(t) }), CUBE), Some(1.0));
     }
 }
+
+#[test]
+fn one_shot_gesture_auto_resets() {
+    // CPM's gestureTimeout: a non-looping gesture is cleared ceil(len / 50) + 5 ticks after it
+    // started (here 1000 ms: 25 ticks, 1250 ms); a looping one never is.
+    let set = AnimSet {
+        gestures: vec![
+            gesture("wave", GestureKind::Gesture, false, false, vec![const_clip(1.0, 0)]),
+            gesture("dance", GestureKind::Gesture, true, false, vec![const_clip(1.0, 0)]),
+        ],
+        ..Default::default()
+    };
+    let mut e = Engine::new(set);
+    e.play_gesture(0, 100);
+    e.auto_reset_gesture(100 + 1249);
+    assert_eq!(e.playing_gesture(), Some(0));
+    e.auto_reset_gesture(100 + 1250);
+    assert_eq!(e.playing_gesture(), None);
+    // Pressed again after the reset: it plays again (not a toggle off).
+    e.play_gesture(0, 2000);
+    assert_eq!(e.playing_gesture(), Some(0));
+    e.play_gesture(1, 3000);
+    e.auto_reset_gesture(1_000_000);
+    assert_eq!(e.playing_gesture(), Some(1));
+}

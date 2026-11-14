@@ -468,23 +468,26 @@ fn others_off_setting_draws_none() {
     assert_eq!(cpm::with_other_model(1, |_, _| ()), None);
     assert_eq!(cpm::texture_upload(Instant::now()), None);
     assert_eq!(cpm::others_loaded(), 0);
-    // The settings page: the two buttons after Gestures…, then the count.
-    let idle = cpm::ConvertView { busy: false, last: None, limit_kib: 8, old_conversion: false };
-    let view = cpm::OthersView { on: false, max: 8, loaded: 0, no_room: 0 };
-    let labels = cpm::settings_page(None, None, &idle, &view);
-    assert_eq!(labels[..5], cpm::settings_labels(None, None, &idle)[..]);
-    assert_eq!(labels[5], "Other players' models: Off");
-    assert_eq!(labels[6], "Max other models: 8");
-    assert_eq!(labels.len(), 7);
-    let view = cpm::OthersView { on: true, max: 4, loaded: 3, no_room: 1 };
-    let labels = cpm::settings_page(None, Some("cpm: x: bad"), &idle, &view);
-    assert_eq!(labels[5], "Other players' models: On");
-    assert_eq!(labels[6], "Max other models: 4");
-    assert_eq!(labels[7], "Other players' models loaded: 3 (1 without room)");
+    // The settings page: the two buttons after Convert project…, then the count.
+    let idle = cpm::ConvertView { busy: false, last: None, old_conversion: false };
+    let view = cpm::OthersView { on: false, max: 8, ..Default::default() };
+    let labels = cpm::settings_page(None, None, &idle, &view, None);
+    assert_eq!(labels[..3], cpm::settings_labels(None, None, &idle)[..]);
+    assert_eq!(labels[3], "Other players' models: Off");
+    assert_eq!(labels[4], "Max other models: 8");
+    assert_eq!(labels[5], "Safety level: Medium");
+    assert_eq!(labels.len(), 6);
+    let view = cpm::OthersView { on: true, max: 4, loaded: 3, no_room: 1, safety: cpm::SafetyLevel::Low, ..Default::default() };
+    let labels = cpm::settings_page(None, Some("cpm: x: bad"), &idle, &view, None);
+    assert_eq!(labels[3], "Other players' models: On");
+    assert_eq!(labels[4], "Max other models: 4");
+    assert_eq!(labels[5], "Safety level: Low");
+    assert_eq!(labels[6], "Other players' models loaded: 3 (1 without room)");
     assert_eq!(labels.last().unwrap(), "Error: cpm: x: bad");
-    assert_eq!(cpm::click(5, &[], None), cpm::Click::OthersToggle);
-    assert_eq!(cpm::click(6, &[], None), cpm::Click::MaxOthers);
-    assert_eq!(cpm::click(7, &[], None), cpm::Click::Nothing);
+    assert_eq!(cpm::click(3, &[], None), cpm::Click::OthersToggle);
+    assert_eq!(cpm::click(4, &[], None), cpm::Click::MaxOthers);
+    assert_eq!(cpm::click(5, &[], None), cpm::Click::Safety);
+    assert_eq!(cpm::click(6, &[], None), cpm::Click::Nothing);
     // On again: loaded again.
     cpm::set_others_on(true);
     settle(&[player(1, &a)]);
@@ -552,6 +555,8 @@ fn oversized_model_refused() {
     assert_eq!(cpm::OTHER_MAX_LINK_BYTES, 100 * 1024);
     assert_eq!(cpm::fetch_limit("others|git:a/b"), cpm::OTHER_MAX_LINK_BYTES as u64);
     assert_eq!(cpm::fetch_limit("git:a/b"), 16 * 1024 * 1024);
+    // Each refusal is a block by the safety level, counted for the settings page.
+    assert_eq!(cpm::others_view().blocked, 5);
     // The local player has no error of theirs.
     assert_eq!(cpm::last_error(), None);
 }
@@ -1014,4 +1019,118 @@ fn failed_downloads_retried_later() {
     assert!(matches!(cpm::other_status(2), Some(OtherStatus::Error(_))));
     cpm::others_tick_at(&players, &READER, Instant::now() + cpm::OTHER_RETRY_DELAY * 2);
     assert!(matches!(cpm::other_status(2), Some(OtherStatus::Error(_))));
+}
+
+#[test]
+fn safety_levels_are_cpms_profiles() {
+    use cpm::SafetyLevel::{High, Low, Medium, Off};
+    // The `safety` setting: Medium unless set (CPM's default profile).
+    assert_eq!(cpm::SAFETY_SETTING, "safety");
+    assert_eq!(cpm::safety_level(None), Medium);
+    assert_eq!(cpm::safety_level(Some("junk".into())), Medium);
+    for level in [Off, Low, Medium, High] {
+        assert_eq!(cpm::safety_level(Some(level.setting().to_owned())), level);
+    }
+    assert_eq!(cpm::safety_level(Some(" LOW ".into())), Low);
+    assert_eq!(Medium.setting(), "medium");
+    assert_eq!(Off.label(), "Off");
+    // The button's turn: Medium, Low, Off, High, Medium.
+    assert_eq!([Medium.next(), Low.next(), Off.next(), High.next()], [Low, Off, High, Medium]);
+    // BuiltInSafetyProfiles: models, animated textures, texture sheet, link KiB, cubes.
+    let p = |l: cpm::SafetyLevel| {
+        let p = l.profile();
+        (p.models, p.animated_textures, p.max_texture_px, p.max_link_kib, p.max_cubes)
+    };
+    assert_eq!(p(Off), (true, true, 8192, 256 * 1024, i32::MAX as usize));
+    assert_eq!(p(Low), (true, true, 512, 1024, 1024));
+    assert_eq!(p(Medium), (true, false, 256, 100, 256));
+    assert_eq!(p(High), (false, false, 0, 0, 0));
+    // The link cap is the download's (Off: the gist fetcher's own 16 MiB at most); the whole
+    // model's data scales with it.
+    assert_eq!(Medium.profile().link_bytes(), cpm::OTHER_MAX_LINK_BYTES);
+    assert_eq!(Low.profile().link_bytes(), 1024 * 1024);
+    assert_eq!(Off.profile().link_bytes(), 16 * 1024 * 1024);
+    assert_eq!(Medium.profile().max_model_bytes, cpm::OTHER_MAX_MODEL_BYTES);
+    assert_eq!(Low.profile().max_model_bytes, 4 * 1024 * 1024);
+    assert_eq!(Off.profile().max_model_bytes, 32 * 1024 * 1024);
+}
+
+#[test]
+fn safety_level_persists() {
+    // Read once from the `safety` setting.
+    cpm::restore_others_settings(|k| (k == cpm::SAFETY_SETTING).then(|| "low".to_owned()));
+    assert_eq!(cpm::others_view().safety, cpm::SafetyLevel::Low);
+    cpm::set_safety_level(cpm::SafetyLevel::Off);
+    assert_eq!(cpm::others_view().safety, cpm::SafetyLevel::Off);
+    // (Settings already read: not read again.)
+    cpm::restore_others_settings(|_| Some("high".to_owned()));
+    assert_eq!(cpm::others_view().safety, cpm::SafetyLevel::Off);
+}
+
+#[test]
+fn safety_level_blocks_and_reloads() {
+    let _serial = serial();
+    let dir = scratch("safety");
+    cpm::set_data_dir(dir.clone());
+    // A model of 269 cubes: past Medium's 256.
+    cache_link(&dir, "git:safety/c269", &textured_model(64, 64, 0xFF00_FF00, 269));
+    let many = skin_file(&dir, "many.png", 0xFF33_6699, Some(&link_data("git:safety/c269")));
+    let small = skin_file(&dir, "small.png", 0xFF11_2233, Some(&cube_model()));
+    let players = [player(1, &many), player(2, &small)];
+    assert_eq!(cpm::others_view().safety, cpm::SafetyLevel::Medium);
+    settle(&players);
+    match cpm::other_status(1) {
+        Some(OtherStatus::Error(e)) => assert!(e.contains("269 cubes are too many (at most 256)"), "{e}"),
+        s => panic!("{s:?}"),
+    }
+    assert_eq!(cpm::other_status(2), Some(OtherStatus::Loaded));
+    // The settings page says so, with the first reason.
+    let view = cpm::others_view();
+    assert_eq!(view.blocked, 1);
+    let idle = cpm::ConvertView { busy: false, last: None, old_conversion: false };
+    let labels = cpm::settings_page(None, None, &idle, &view, None);
+    let line = "Blocked by safety level: 1 player (269 cubes are too many (at most 256)) — raise the safety level to see them";
+    assert!(labels.iter().any(|l| l == line), "{labels:?}");
+    // Low: loaded now.
+    cpm::set_safety_level(cpm::SafetyLevel::Low);
+    settle(&players);
+    assert_eq!(cpm::other_status(1), Some(OtherStatus::Loaded));
+    assert_eq!(cpm::other_status(2), Some(OtherStatus::Loaded));
+    assert_eq!(cpm::others_view().blocked, 0);
+    let labels = cpm::settings_page(None, None, &idle, &cpm::others_view(), None);
+    assert!(!labels.iter().any(|l| l.starts_with("Blocked")), "{labels:?}");
+    // Medium again: the model now past it goes (blocked again); the small one loads again too.
+    cpm::set_safety_level(cpm::SafetyLevel::Medium);
+    cpm::others_tick(&players, &READER);
+    assert_ne!(cpm::other_status(1), Some(OtherStatus::Loaded));
+    settle(&players);
+    assert!(matches!(cpm::other_status(1), Some(OtherStatus::Error(_))));
+    assert_eq!(cpm::other_status(2), Some(OtherStatus::Loaded));
+    assert_eq!(cpm::others_view().blocked, 1);
+    // High: no other player's model loads at all.
+    cpm::set_safety_level(cpm::SafetyLevel::High);
+    cpm::others_tick(&players, &READER);
+    assert_eq!(cpm::other_status(1), None);
+    assert_eq!(cpm::other_status(2), None);
+    assert_eq!(cpm::texture_upload(Instant::now()), None);
+    assert_eq!(cpm::others_loaded(), 0);
+    // Off: everything CPM allows.
+    cpm::set_safety_level(cpm::SafetyLevel::Off);
+    settle(&players);
+    assert_eq!(cpm::other_status(1), Some(OtherStatus::Loaded));
+}
+
+#[test]
+fn safety_level_sets_the_download_cap() {
+    let _serial = serial();
+    let dir = scratch("safety_dl");
+    cpm::set_data_dir(dir.clone());
+    cpm::set_safety_level(cpm::SafetyLevel::Low);
+    let s = skin_file(&dir, "dl.png", 0xFF33_6699, Some(&link_data("git:safetydl/a1")));
+    let key = requested(&[player(1, &s)]).pop().unwrap().0;
+    assert_eq!(cpm::fetch_limit(&key), 1024 * 1024);
+    cpm::finish_fetch(&key, Err("larger than 1 MiB".into()));
+    settle(&[player(1, &s)]);
+    assert!(matches!(cpm::other_status(1), Some(OtherStatus::Error(_))));
+    assert_eq!(cpm::others_view().blocked, 1);
 }

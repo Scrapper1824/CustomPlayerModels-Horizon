@@ -4,3 +4,5 @@ native/target/
 .superpowers/
 native/cpm/mixins/cpm/cpm-core/Cargo.lock
 __pycache__/
+for-friend/
+native/cpm/mixins/cpm/cpm-core/tests/samples/GreenRaptor.cpmmodel

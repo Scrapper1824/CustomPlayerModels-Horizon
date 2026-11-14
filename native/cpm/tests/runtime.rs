@@ -386,16 +386,16 @@ fn list_models_sorted_cpmmodel_only() {
     assert!(cpm::list_models(&dir.join("missing")).is_empty());
 }
 
-/// The settings page's convert state with nothing running or done, the default gist limit.
+/// The settings page's convert state with nothing running or done.
 fn idle() -> cpm::ConvertView<'static> {
-    cpm::ConvertView { busy: false, last: None, limit_kib: 8, old_conversion: false }
+    cpm::ConvertView { busy: false, last: None, old_conversion: false }
 }
 
 #[test]
 fn labels_none_selected() {
     assert_eq!(
         cpm::settings_labels(None, None, &idle()),
-        ["Model: None", "Open models folder", "Convert project…", "Gist limit: 8 KiB", "Gestures…"]
+        ["Model: None", "Open models folder", "Convert project…"]
     );
 }
 
@@ -403,16 +403,18 @@ fn labels_none_selected() {
 fn labels_selected_and_error() {
     assert_eq!(
         cpm::settings_labels(Some(Path::new("m/b.cpmmodel")), Some("cpm: b.cpmmodel: bad"), &idle()),
-        ["Model: b", "Open models folder", "Convert project…", "Gist limit: 8 KiB", "Gestures…", "Error: cpm: b.cpmmodel: bad"]
+        ["Model: b", "Open models folder", "Convert project…", "Error: cpm: b.cpmmodel: bad"]
     );
 }
 
+/// The gesture menu is the G key's: no `Gestures…` button on the settings page.
 #[test]
-fn settings_has_gestures_button() {
+fn settings_has_no_gestures_button() {
     let labels = cpm::settings_labels(None, None, &idle());
-    assert!(!labels.iter().any(|l| l.starts_with("Gesture ") || l.starts_with("Pose ")));
-    let at = labels.iter().position(|l| l == "Gestures…").expect("button");
-    assert_eq!(cpm::click(at, &[], None), cpm::Click::Gestures);
+    assert!(!labels.iter().any(|l| l.starts_with("Gesture") || l.starts_with("Pose ")), "{labels:?}");
+    let view = cpm::OthersView { on: true, max: 8, ..Default::default() };
+    let page = cpm::settings_page(None, None, &idle(), &view, None);
+    assert!(!page.iter().any(|l| l.starts_with("Gesture")), "{page:?}");
     assert!(!cpm::take_menu_request());
     cpm::request_menu();
     assert!(cpm::take_menu_request());
@@ -433,11 +435,13 @@ fn click_cycles_models() {
     assert_eq!(cpm::click(0, &[], None), Click::Select(None));
     assert_eq!(cpm::click(1, &models, None), Click::OpenFolder);
     assert_eq!(cpm::click(2, &models, None), Click::Convert);
-    assert_eq!(cpm::click(3, &models, None), Click::GistLimit);
-    assert_eq!(cpm::click(4, &models, None), Click::Gestures);
-    assert_eq!(cpm::click(5, &models, None), Click::OthersToggle);
-    assert_eq!(cpm::click(6, &models, None), Click::MaxOthers);
-    assert_eq!(cpm::click(7, &models, None), Click::Nothing);
+    assert_eq!(cpm::click(3, &models, None), Click::OthersToggle);
+    assert_eq!(cpm::click(4, &models, None), Click::MaxOthers);
+    assert_eq!(cpm::click(5, &models, None), Click::Safety);
+    assert_eq!(cpm::click(6, &models, None), Click::Nothing);
+    assert_eq!(cpm::GIST_BUTTON, 6);
+    assert_eq!(cpm::click_page(cpm::GIST_BUTTON, &models, None, true), Click::MakeGist);
+    assert_eq!(cpm::click_page(7, &models, None, true), Click::Nothing);
     // Stored as the file name ("" for none).
     assert_eq!(cpm::model_setting(Some(&b)), "b.cpmmodel");
     assert_eq!(cpm::model_setting(None), "");
@@ -646,28 +650,15 @@ fn stored_selection_is_restored_once() {
     assert_eq!(cpm::selected(), Some(dir.join("b.cpmmodel")));
 }
 
-/// The bundle's `[api]` package: what puts CPM in `mod_api::mods()`, without which the game never
-/// reserves the `horizon/modimage` sprite (the launcher's `native_mods::api` rules; `native.py check`
-/// compiles it into the generated game).
+/// No `[api]` package: Horizon reserves the `horizon/modimage` sprite for any game built with native
+/// mods, and a trait mod would make the launcher generate the game's main (whose allocator line has
+/// broken builds when the launcher and the Horizon nightly disagree).
 #[test]
-fn bundle_declares_the_trait_mod_package() {
+fn bundle_has_no_trait_mod_package() {
     let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("mixins/cpm");
-    // Line endings as checked out (CRLF on Windows) don't matter.
-    let read = |path: &str| std::fs::read_to_string(bundle.join(path)).unwrap().replace("\r\n", "\n");
-    let manifest = read("horizon-mixin.toml");
-    // `[api]` accepts only `path`, a folder in the bundle with a Cargo.toml.
-    let api = manifest.split("\n[api]\n").nth(1).expect("an [api] table");
-    let table = api.split("\n[").next().unwrap();
-    let keys: Vec<&str> = table.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).collect();
-    assert_eq!(keys, ["path = \"api\""]);
-    let cargo = read("api/Cargo.toml");
-    assert!(cargo.lines().any(|l| l.starts_with("horizon-client = ")), "{cargo}");
-    // Horizon's crates only: horizon-client is its one dependency.
-    let deps = cargo.split("[dependencies]").nth(1).unwrap();
-    assert_eq!(deps.lines().filter(|l| l.contains('=')).count(), 1, "{deps}");
-    let lib = read("api/src/lib.rs");
-    assert!(lib.contains("pub fn hooks() -> Box<dyn Hooks>"), "{lib}");
-    assert!(lib.contains("impl Hooks for Cpm {}"), "overrides nothing: {lib}");
+    let manifest = std::fs::read_to_string(bundle.join("horizon-mixin.toml")).unwrap(); // lines() handles CRLF too
+    assert!(!manifest.lines().any(|l| l.trim() == "[api]"), "no [api] table");
+    assert!(!bundle.join("api").exists(), "no api package folder");
 }
 
 // ---- Converting a .cpmproject (the settings page's Convert project… button) ----
@@ -775,19 +766,12 @@ fn bad_project_writes_nothing() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The gist limit is fixed: 64 KiB, no setting and no button.
 #[test]
-fn gist_limit_parse() {
-    assert_eq!(cpm::gist_limit(None), 8);
-    assert_eq!(cpm::gist_limit(Some("16".into())), 16);
-    assert_eq!(cpm::gist_limit(Some(" 32 ".into())), 32);
-    assert_eq!(cpm::gist_limit(Some("".into())), 8);
-    assert_eq!(cpm::gist_limit(Some("lots".into())), 8);
-    assert_eq!(cpm::gist_limit(Some("0".into())), 1);
-    assert_eq!(cpm::gist_limit(Some("5000".into())), 1024);
-    // The button cycles 4, 8, 16, 32, 64; anything else starts over at 4.
-    let cycle: Vec<u32> = [4, 8, 16, 32, 64, 1, 100].into_iter().map(cpm::next_gist_limit).collect();
-    assert_eq!(cycle, [8, 16, 32, 64, 4, 4, 4]);
-    assert_eq!(cpm::GIST_LIMIT_SETTING, "gist_limit_kib");
+fn gist_limit_is_fixed_64_kib() {
+    assert_eq!(cpm::GIST_LIMIT_KIB, 64);
+    let labels = cpm::settings_labels(None, None, &idle());
+    assert!(!labels.iter().any(|l| l.contains("Gist limit")), "{labels:?}");
 }
 
 /// The only test touching the job handoff (a process-wide static, shared by the test threads).
@@ -843,14 +827,14 @@ fn noted_result_is_shown_and_too_big_pends_popup() {
 
 #[test]
 fn labels_show_convert_state() {
-    let view = |busy, last, limit_kib| cpm::ConvertView { busy, last, limit_kib, old_conversion: false };
+    let view = |busy, last, _| cpm::ConvertView { busy, last, old_conversion: false };
     let labels = |v: &cpm::ConvertView<'_>| cpm::settings_labels(None, None, v)[2..].to_vec();
-    assert_eq!(labels(&view(false, None, 8)), ["Convert project…", "Gist limit: 8 KiB", "Gestures…"]);
-    assert_eq!(labels(&view(true, None, 64)), ["Converting…", "Gist limit: 64 KiB", "Gestures…"]);
+    assert_eq!(labels(&view(false, None, 8)), ["Convert project…"]);
+    assert_eq!(labels(&view(true, None, 64)), ["Converting…"]);
     let small = cpm::ConvertResult::Saved { model: "m/a.cpmmodel".into(), too_big: false, size: 2049, skipped: 0 };
     assert_eq!(
         labels(&view(false, Some(&small), 8)),
-        ["Convert project…", "Gist limit: 8 KiB", "Gestures…", "Converted: a.cpmmodel (3 KiB)"]
+        ["Convert project…", "Converted: a.cpmmodel (3 KiB)"]
     );
     let skipped = cpm::ConvertResult::Saved { model: "m/a.cpmmodel".into(), too_big: false, size: 2049, skipped: 2 };
     assert_eq!(cpm::convert_label(&skipped), "Converted: a.cpmmodel (3 KiB) (2 skipped, see log)");
@@ -859,8 +843,6 @@ fn labels_show_convert_state() {
         labels(&view(false, Some(&big), 8)),
         [
             "Convert project…",
-            "Gist limit: 8 KiB",
-            "Gestures…",
             "Converted: b.cpmmodel — too big: the gist popup opens when you return to the game"
         ]
     );
@@ -873,7 +855,7 @@ fn labels_show_convert_state() {
     // The result line comes before the model's error line.
     assert_eq!(
         cpm::settings_labels(None, Some("cpm: x: bad"), &view(true, Some(&failed), 4))[2..],
-        ["Converting…", "Gist limit: 4 KiB", "Gestures…", "Convert error: broken.cpmproject: bad zip", "Error: cpm: x: bad"]
+        ["Converting…", "Convert error: broken.cpmproject: bad zip", "Error: cpm: x: bad"]
     );
 }
 
@@ -1012,10 +994,12 @@ fn popup_lines_copy() {
         vec![
             "Expie_by_Clouddy.cpmmodel is 41 KiB, too big to send directly.".to_owned(),
             "1. Press Copy text (also saved as Expie_by_Clouddy.gist.txt).".to_owned(),
-            "2. Create a public gist with it at gist.github.com.".to_owned(),
-            "3. Paste the gist link here and press Save link.".to_owned(),
+            "2. Press Open gist.github.com, paste it, create a public gist.".to_owned(),
+            "3. Copy the new gist's link, paste it here, press Save link.".to_owned(),
+            "4. Expie_by_Clouddy.link.cpmmodel is then your model: others get it.".to_owned(),
         ]
     );
+    assert_eq!(cpm::popup_lines(&p).len(), cpm::GIST_LINES);
     assert_eq!(cpm::GIST_TITLE, "Upload to a GitHub Gist");
     assert_eq!(cpm::copy_failed_message(&p), "Couldn't copy — open Expie_by_Clouddy.gist.txt instead");
 }
@@ -1608,7 +1592,7 @@ fn old_conversion_line_only_for_stale_models() {
     }
     let dir = scratch("old_conversion");
     let labels = || {
-        let view = cpm::ConvertView { busy: false, last: None, limit_kib: 8, old_conversion: cpm::old_conversion() };
+        let view = cpm::ConvertView { busy: false, last: None, old_conversion: cpm::old_conversion() };
         cpm::settings_labels(cpm::selected().as_deref(), cpm::last_error().as_deref(), &view)
     };
     let stale = |l: &Vec<String>| l.iter().any(|x| x.starts_with("Old conversion"));
